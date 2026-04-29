@@ -14,7 +14,7 @@ def main() -> None:
     required_tokens = [
         "prepare_tradingview_ohlc",
         "compute_daily_attack_stats",
-        "compute_morning_attack_stats",
+        "compute_4h_attack_stats",
         "Previous Day High/Low Attack",
     ]
     for token in required_tokens:

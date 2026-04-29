@@ -153,7 +153,7 @@ def compute_daily_attack_stats(df_daily: pd.DataFrame) -> pd.DataFrame:
     )
 
 
-def compute_morning_attack_stats(df_daily: pd.DataFrame, df_4h: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+def compute_4h_attack_stats(df_daily: pd.DataFrame, df_4h: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     daily = df_daily.copy()
     daily["date"] = daily["time"].dt.date
     daily = daily.set_index("date")
@@ -169,43 +169,47 @@ def compute_morning_attack_stats(df_daily: pd.DataFrame, df_4h: pd.DataFrame) ->
         .sort_values("4H Start Time")
     )
 
-    morning = h4[h4["clock"].isin(["05:15", "09:15"])].copy()
-    morning["prev_daily_date"] = morning["date"].apply(lambda d: d - pd.Timedelta(days=1))
-    morning = morning[morning["prev_daily_date"].isin(daily.index)]
-    morning["prev_open"] = morning["prev_daily_date"].map(daily["open"])
-    morning["prev_close"] = morning["prev_daily_date"].map(daily["close"])
-    morning["prev_high"] = morning["prev_daily_date"].map(daily["high"])
-    morning["prev_low"] = morning["prev_daily_date"].map(daily["low"])
-    morning["prev_color"] = pd.Series(pd.NA, index=morning.index, dtype="object")
-    morning.loc[morning["prev_close"] > morning["prev_open"], "prev_color"] = "green"
-    morning.loc[morning["prev_close"] < morning["prev_open"], "prev_color"] = "red"
-
-    def summarize(candle_time: str, color: str, side: str) -> tuple[int, int]:
-        sample = morning[(morning["clock"] == candle_time) & (morning["prev_color"] == color)]
-        if side == "high":
-            success = (sample["high"] > sample["prev_high"]).sum()
-        else:
-            success = (sample["low"] < sample["prev_low"]).sum()
-        return int(sample.shape[0]), int(success)
+    merged = h4.copy()
+    merged["prev_daily_date"] = merged["date"].apply(lambda d: d - pd.Timedelta(days=1))
+    merged = merged[merged["prev_daily_date"].isin(daily.index)]
+    merged["prev_open"] = merged["prev_daily_date"].map(daily["open"])
+    merged["prev_close"] = merged["prev_daily_date"].map(daily["close"])
+    merged["prev_high"] = merged["prev_daily_date"].map(daily["high"])
+    merged["prev_low"] = merged["prev_daily_date"].map(daily["low"])
+    merged["prev_color"] = pd.Series(pd.NA, index=merged.index, dtype="object")
+    merged.loc[merged["prev_close"] > merged["prev_open"], "prev_color"] = "green"
+    merged.loc[merged["prev_close"] < merged["prev_open"], "prev_color"] = "red"
 
     rows = []
-    for color, side, label in [
-        ("green", "high", "breaks prev daily high"),
-        ("red", "low", "breaks prev daily low"),
-    ]:
-        for ctime, cname in [("05:15", "First morning"), ("09:15", "Second morning")]:
-            total, success = summarize(ctime, color, side)
-            rows.append(
-                {
-                    "Scenario": f"{cname} ({ctime}) after {color} prev daily candle → {label}",
-                    "Total Cases": total,
-                    "Successful Attacks": success,
-                    "Attack %": (success / total * 100.0) if total else 0.0,
-                }
-            )
+    for ctime in sorted(merged["clock"].dropna().unique()):
+        green_sample = merged[(merged["clock"] == ctime) & (merged["prev_color"] == "green")]
+        green_success = int((green_sample["high"] > green_sample["prev_high"]).sum())
+        green_total = int(green_sample.shape[0])
+        rows.append(
+            {
+                "4H Candle Start": ctime,
+                "Scenario": "After green prev daily candle → attacks prev daily high",
+                "Total Cases": green_total,
+                "Successful Attacks": green_success,
+                "Attack %": (green_success / green_total * 100.0) if green_total else 0.0,
+            }
+        )
+
+        red_sample = merged[(merged["clock"] == ctime) & (merged["prev_color"] == "red")]
+        red_success = int((red_sample["low"] < red_sample["prev_low"]).sum())
+        red_total = int(red_sample.shape[0])
+        rows.append(
+            {
+                "4H Candle Start": ctime,
+                "Scenario": "After red prev daily candle → attacks prev daily low",
+                "Total Cases": red_total,
+                "Successful Attacks": red_success,
+                "Attack %": (red_success / red_total * 100.0) if red_total else 0.0,
+            }
+        )
 
     debug_cols = ["time", "clock", "date", "prev_daily_date", "prev_color", "prev_high", "prev_low"]
-    return pd.DataFrame(rows), starts, morning[debug_cols].sort_values("time")
+    return pd.DataFrame(rows), starts, merged[debug_cols].sort_values("time")
 
 
 def save_upload(uploaded_file) -> dict:
@@ -291,12 +295,12 @@ def main() -> None:
         else:
             st.info("GER40 daily stats skipped (file unavailable or parse failed).")
 
-        st.markdown("**4H second-morning-candle stats**")
+        st.markdown("**4H candle attack stats (all 4H candles)**")
         if "GER40_1D" in parsed and "GER40_4H" in parsed:
-            h4_stats, starts, debug = compute_morning_attack_stats(parsed["GER40_1D"], parsed["GER40_4H"])
+            h4_stats, starts, debug = compute_4h_attack_stats(parsed["GER40_1D"], parsed["GER40_4H"])
             st.dataframe(h4_stats.style.format({"Attack %": "{:.2f}%"}), use_container_width=True)
             st.caption(
-                "Comparison of first (≈05:15) vs second (≈09:15) morning 4H candles, conditioned on previous daily candle color."
+                "Each 4H start time is evaluated separately; times shown are detected from the GER40 data."
             )
 
             with st.expander("Debug details (for validation when numbers differ)"):
@@ -304,9 +308,9 @@ def main() -> None:
                 st.dataframe(starts, use_container_width=True)
                 st.markdown("**Daily/4H matching sample (includes matched daily date and previous daily candle date)**")
                 st.dataframe(debug, use_container_width=True)
-                st.write(f"Number of matched morning cases: {len(debug):,}")
+                st.write(f"Number of matched 4H cases: {len(debug):,}")
         else:
-            st.info("GER40 4H morning stats skipped (required GER40 daily/4H file unavailable or parse failed).")
+            st.info("GER40 4H candle stats skipped (required GER40 daily/4H file unavailable or parse failed).")
 
     with us30_tab:
         st.markdown("**Daily attack stats**")
@@ -323,12 +327,12 @@ def main() -> None:
         else:
             st.info("US30 daily stats skipped (file unavailable or parse failed).")
 
-        st.markdown("**4H second-morning-candle stats**")
+        st.markdown("**4H candle attack stats (all 4H candles)**")
         if "US30_1D" in parsed and "US30_4H" in parsed:
-            h4_stats, starts, debug = compute_morning_attack_stats(parsed["US30_1D"], parsed["US30_4H"])
+            h4_stats, starts, debug = compute_4h_attack_stats(parsed["US30_1D"], parsed["US30_4H"])
             st.dataframe(h4_stats.style.format({"Attack %": "{:.2f}%"}), use_container_width=True)
             st.caption(
-                "Comparison of first (≈05:15) vs second (≈09:15) morning 4H candles, conditioned on previous daily candle color."
+                "US30 uses its own detected 4H candle start times (which can differ from GER40 session timing)."
             )
 
             with st.expander("Debug details (for validation when numbers differ)"):
@@ -336,31 +340,9 @@ def main() -> None:
                 st.dataframe(starts, use_container_width=True)
                 st.markdown("**Daily/4H matching sample (includes matched daily date and previous daily candle date)**")
                 st.dataframe(debug, use_container_width=True)
-                st.write(f"Number of matched morning cases: {len(debug):,}")
+                st.write(f"Number of matched 4H cases: {len(debug):,}")
         else:
-            st.info("US30 4H morning stats skipped (required US30 daily/4H file unavailable or parse failed).")
-
-    st.subheader("Uploaded datasets")
-    catalog = load_catalog()
-    if not catalog:
-        st.info("No datasets uploaded yet.")
-        return
-
-    table = pd.DataFrame(catalog)
-    st.dataframe(table, use_container_width=True)
-
-    selected_path = st.selectbox("Choose dataset to preview", table["saved_path"].tolist())
-    df = load_dataframe(selected_path)
-
-    st.subheader("5) Dataset preview")
-    st.write(f"Rows: {len(df):,} | Columns: {len(df.columns):,}")
-    st.dataframe(df.head(200), use_container_width=True)
-
-    numeric_cols = df.select_dtypes(include="number").columns.tolist()
-    if numeric_cols:
-        st.subheader("Quick numeric chart")
-        y_col = st.selectbox("Numeric column", numeric_cols)
-        st.line_chart(df[y_col])
+            st.info("US30 4H candle stats skipped (required US30 daily/4H file unavailable or parse failed).")
 
 
 if __name__ == "__main__":
