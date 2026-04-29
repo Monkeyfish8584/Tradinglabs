@@ -36,13 +36,46 @@ def save_catalog(entries: list[dict]) -> None:
         json.dump(entries, f, indent=2)
 
 
-
-
 def list_github_dropzone_files() -> list[Path]:
     if not GITHUB_DROPZONE.exists():
         return []
-    files = [p for p in GITHUB_DROPZONE.iterdir() if p.is_file() and p.suffix.lower() in {".csv", ".parquet", ".pq"}]
+    files = [
+        p
+        for p in GITHUB_DROPZONE.iterdir()
+        if p.is_file() and p.suffix.lower() in {".csv", ".parquet", ".pq"}
+    ]
     return sorted(files)
+
+
+def build_metadata(file_path: Path, source: str) -> dict:
+    df = load_dataframe(str(file_path))
+    return {
+        "file_name": file_path.name,
+        "saved_path": str(file_path),
+        "uploaded_at_utc": datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ"),
+        "source": source,
+        "rows": int(df.shape[0]),
+        "columns": int(df.shape[1]),
+        "column_names": list(df.columns),
+    }
+
+
+def sync_dropzone_to_catalog() -> tuple[int, int]:
+    catalog = load_catalog()
+    known_paths = {item.get("saved_path") for item in catalog}
+    imported = 0
+    skipped = 0
+
+    for file_path in list_github_dropzone_files():
+        if str(file_path) in known_paths:
+            skipped += 1
+            continue
+        catalog.append(build_metadata(file_path, source="github_dropzone"))
+        imported += 1
+
+    if imported:
+        save_catalog(catalog)
+    return imported, skipped
 
 
 def save_upload(uploaded_file) -> dict:
@@ -54,16 +87,7 @@ def save_upload(uploaded_file) -> dict:
     with target_path.open("wb") as out:
         out.write(uploaded_file.getbuffer())
 
-    df = load_dataframe(str(target_path))
-    metadata = {
-        "file_name": uploaded_file.name,
-        "saved_path": str(target_path),
-        "uploaded_at_utc": timestamp,
-        "rows": int(df.shape[0]),
-        "columns": int(df.shape[1]),
-        "column_names": list(df.columns),
-    }
-    return metadata
+    return build_metadata(target_path, source="streamlit_upload")
 
 
 def main() -> None:
@@ -88,12 +112,14 @@ def main() -> None:
         except Exception as exc:  # noqa: BLE001
             st.error(f"Upload failed: {exc}")
 
-
     st.subheader("2) GitHub dropzone files")
-    st.caption("You can commit files into github_data/dropzone/ and they appear here.")
+    st.caption("You can commit files into github_data/dropzone/ and sync them into the catalog.")
     drop_files = list_github_dropzone_files()
     if drop_files:
         st.write([f.name for f in drop_files])
+        if st.button("Sync dropzone files into catalog"):
+            imported, skipped = sync_dropzone_to_catalog()
+            st.success(f"Sync complete: imported {imported}, skipped {skipped} existing file(s).")
     else:
         st.info("No files found in github_data/dropzone yet.")
 

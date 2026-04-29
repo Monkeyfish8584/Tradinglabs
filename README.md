@@ -30,5 +30,5 @@ If you want a simple GitHub area to save files immediately, use `github_data/dro
 
 - Put CSV/Parquet files there.
 - Commit and push to GitHub.
-- I can use those files in later dashboard tasks.
+- In the app, click **Sync dropzone files into catalog** to register them for preview/charting.
 
