@@ -153,7 +153,7 @@ def compute_daily_attack_stats(df_daily: pd.DataFrame) -> pd.DataFrame:
     )
 
 
-def compute_ger40_morning_stats(df_daily: pd.DataFrame, df_4h: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+def compute_morning_attack_stats(df_daily: pd.DataFrame, df_4h: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     daily = df_daily.copy()
     daily["date"] = daily["time"].dt.date
     daily = daily.set_index("date")
@@ -293,7 +293,7 @@ def main() -> None:
 
         st.markdown("**4H second-morning-candle stats**")
         if "GER40_1D" in parsed and "GER40_4H" in parsed:
-            h4_stats, starts, debug = compute_ger40_morning_stats(parsed["GER40_1D"], parsed["GER40_4H"])
+            h4_stats, starts, debug = compute_morning_attack_stats(parsed["GER40_1D"], parsed["GER40_4H"])
             st.dataframe(h4_stats.style.format({"Attack %": "{:.2f}%"}), use_container_width=True)
             st.caption(
                 "Comparison of first (≈05:15) vs second (≈09:15) morning 4H candles, conditioned on previous daily candle color."
@@ -323,7 +323,24 @@ def main() -> None:
         else:
             st.info("US30 daily stats skipped (file unavailable or parse failed).")
 
-    st.subheader("4) Uploaded datasets")
+        st.markdown("**4H second-morning-candle stats**")
+        if "US30_1D" in parsed and "US30_4H" in parsed:
+            h4_stats, starts, debug = compute_morning_attack_stats(parsed["US30_1D"], parsed["US30_4H"])
+            st.dataframe(h4_stats.style.format({"Attack %": "{:.2f}%"}), use_container_width=True)
+            st.caption(
+                "Comparison of first (≈05:15) vs second (≈09:15) morning 4H candles, conditioned on previous daily candle color."
+            )
+
+            with st.expander("Debug details (for validation when numbers differ)"):
+                st.markdown("**Detected 4H candle start times**")
+                st.dataframe(starts, use_container_width=True)
+                st.markdown("**Daily/4H matching sample (includes matched daily date and previous daily candle date)**")
+                st.dataframe(debug, use_container_width=True)
+                st.write(f"Number of matched morning cases: {len(debug):,}")
+        else:
+            st.info("US30 4H morning stats skipped (required US30 daily/4H file unavailable or parse failed).")
+
+    st.subheader("Uploaded datasets")
     catalog = load_catalog()
     if not catalog:
         st.info("No datasets uploaded yet.")
@@ -341,7 +358,7 @@ def main() -> None:
 
     numeric_cols = df.select_dtypes(include="number").columns.tolist()
     if numeric_cols:
-        st.subheader("6) Quick numeric chart")
+        st.subheader("Quick numeric chart")
         y_col = st.selectbox("Numeric column", numeric_cols)
         st.line_chart(df[y_col])
 
