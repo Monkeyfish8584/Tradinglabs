@@ -273,38 +273,55 @@ def main() -> None:
             failed_files.append(name)
             st.error(f"{name}: failed to parse ({exc})")
 
-    st.markdown("#### Daily attack stats")
-    for market, key in [("GER40", "GER40_1D"), ("US30", "US30_1D")]:
-        if key not in parsed:
-            st.info(f"{market} daily stats skipped (file unavailable or parse failed).")
-            continue
-        stats = compute_daily_attack_stats(parsed[key])
-        st.markdown(f"**{market} daily**")
-        st.dataframe(
-            stats.style.format({"Attack %": "{:.2f}%", "Close Beyond %": "{:.2f}%"}),
-            use_container_width=True,
-        )
-        st.caption(
-            f"{market}: green-candle follow-through is shown by high breaks, red-candle follow-through by low breaks; "
-            "close-beyond columns show stronger continuation confirmation."
-        )
+    st.markdown("#### Asset stats")
+    ger40_tab, us30_tab = st.tabs(["GER40", "US30"])
 
-    st.markdown("#### GER40 4H second-morning-candle stats")
-    if "GER40_1D" in parsed and "GER40_4H" in parsed:
-        h4_stats, starts, debug = compute_ger40_morning_stats(parsed["GER40_1D"], parsed["GER40_4H"])
-        st.dataframe(h4_stats.style.format({"Attack %": "{:.2f}%"}), use_container_width=True)
-        st.caption(
-            "Comparison of first (≈05:15) vs second (≈09:15) morning 4H candles, conditioned on previous daily candle color."
-        )
+    with ger40_tab:
+        st.markdown("**Daily attack stats**")
+        if "GER40_1D" in parsed:
+            ger40_daily = compute_daily_attack_stats(parsed["GER40_1D"])
+            st.dataframe(
+                ger40_daily.style.format({"Attack %": "{:.2f}%", "Close Beyond %": "{:.2f}%"}),
+                use_container_width=True,
+            )
+            st.caption(
+                "GER40: green-candle follow-through is shown by high breaks, red-candle follow-through by low breaks; "
+                "close-beyond columns show stronger continuation confirmation."
+            )
+        else:
+            st.info("GER40 daily stats skipped (file unavailable or parse failed).")
 
-        with st.expander("Debug details (for validation when numbers differ)"):
-            st.markdown("**Detected 4H candle start times**")
-            st.dataframe(starts, use_container_width=True)
-            st.markdown("**Daily/4H matching sample (includes matched daily date and previous daily candle date)**")
-            st.dataframe(debug, use_container_width=True)
-            st.write(f"Number of matched morning cases: {len(debug):,}")
-    else:
-        st.info("GER40 4H morning stats skipped (required GER40 daily/4H file unavailable or parse failed).")
+        st.markdown("**4H second-morning-candle stats**")
+        if "GER40_1D" in parsed and "GER40_4H" in parsed:
+            h4_stats, starts, debug = compute_ger40_morning_stats(parsed["GER40_1D"], parsed["GER40_4H"])
+            st.dataframe(h4_stats.style.format({"Attack %": "{:.2f}%"}), use_container_width=True)
+            st.caption(
+                "Comparison of first (≈05:15) vs second (≈09:15) morning 4H candles, conditioned on previous daily candle color."
+            )
+
+            with st.expander("Debug details (for validation when numbers differ)"):
+                st.markdown("**Detected 4H candle start times**")
+                st.dataframe(starts, use_container_width=True)
+                st.markdown("**Daily/4H matching sample (includes matched daily date and previous daily candle date)**")
+                st.dataframe(debug, use_container_width=True)
+                st.write(f"Number of matched morning cases: {len(debug):,}")
+        else:
+            st.info("GER40 4H morning stats skipped (required GER40 daily/4H file unavailable or parse failed).")
+
+    with us30_tab:
+        st.markdown("**Daily attack stats**")
+        if "US30_1D" in parsed:
+            us30_daily = compute_daily_attack_stats(parsed["US30_1D"])
+            st.dataframe(
+                us30_daily.style.format({"Attack %": "{:.2f}%", "Close Beyond %": "{:.2f}%"}),
+                use_container_width=True,
+            )
+            st.caption(
+                "US30: green-candle follow-through is shown by high breaks, red-candle follow-through by low breaks; "
+                "close-beyond columns show stronger continuation confirmation."
+            )
+        else:
+            st.info("US30 daily stats skipped (file unavailable or parse failed).")
 
     st.subheader("4) Uploaded datasets")
     catalog = load_catalog()
