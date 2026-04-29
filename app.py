@@ -89,17 +89,23 @@ def ensure_dropzone_catalog_synced() -> tuple[int, int]:
     return sync_dropzone_to_catalog()
 
 
-def prepare_tradingview_ohlc(df: pd.DataFrame) -> pd.DataFrame:
+def prepare_tradingview_ohlc(df: pd.DataFrame) -> tuple[pd.DataFrame, int]:
     required = ["time", "open", "high", "low", "close"]
     missing = [col for col in required if col not in df.columns]
     if missing:
         raise ValueError(f"Missing required columns: {missing}")
     out = df[required].copy()
-    out["time"] = pd.to_datetime(out["time"], errors="coerce")
+    out = out[out["time"].astype(str).str.lower() != "time"].copy()
+    try:
+        out["time"] = pd.to_datetime(out["time"], utc=True, errors="coerce", format="mixed")
+    except TypeError:
+        out["time"] = pd.to_datetime(out["time"], utc=True, errors="coerce")
     for col in ["open", "high", "low", "close"]:
         out[col] = pd.to_numeric(out[col], errors="coerce")
+    before = len(out)
     out = out.dropna(subset=required).sort_values("time").reset_index(drop=True)
-    return out
+    dropped = before - len(out)
+    return out, dropped
 
 
 def compute_daily_attack_stats(df_daily: pd.DataFrame) -> pd.DataFrame:
@@ -256,11 +262,22 @@ def main() -> None:
         return
 
     parsed: dict[str, pd.DataFrame] = {}
+    failed_files: list[str] = []
     for name, key in TARGET_FILES.items():
-        parsed[key] = prepare_tradingview_ohlc(load_dataframe(str(GITHUB_DROPZONE / name)))
+        try:
+            cleaned, dropped = prepare_tradingview_ohlc(load_dataframe(str(GITHUB_DROPZONE / name)))
+            parsed[key] = cleaned
+            if dropped:
+                st.warning(f"{name}: dropped {dropped} row(s) due to invalid/duplicate OHLC data.")
+        except Exception as exc:  # noqa: BLE001
+            failed_files.append(name)
+            st.error(f"{name}: failed to parse ({exc})")
 
     st.markdown("#### Daily attack stats")
     for market, key in [("GER40", "GER40_1D"), ("US30", "US30_1D")]:
+        if key not in parsed:
+            st.info(f"{market} daily stats skipped (file unavailable or parse failed).")
+            continue
         stats = compute_daily_attack_stats(parsed[key])
         st.markdown(f"**{market} daily**")
         st.dataframe(
@@ -273,18 +290,21 @@ def main() -> None:
         )
 
     st.markdown("#### GER40 4H second-morning-candle stats")
-    h4_stats, starts, debug = compute_ger40_morning_stats(parsed["GER40_1D"], parsed["GER40_4H"])
-    st.dataframe(h4_stats.style.format({"Attack %": "{:.2f}%"}), use_container_width=True)
-    st.caption(
-        "Comparison of first (≈05:15) vs second (≈09:15) morning 4H candles, conditioned on previous daily candle color."
-    )
+    if "GER40_1D" in parsed and "GER40_4H" in parsed:
+        h4_stats, starts, debug = compute_ger40_morning_stats(parsed["GER40_1D"], parsed["GER40_4H"])
+        st.dataframe(h4_stats.style.format({"Attack %": "{:.2f}%"}), use_container_width=True)
+        st.caption(
+            "Comparison of first (≈05:15) vs second (≈09:15) morning 4H candles, conditioned on previous daily candle color."
+        )
 
-    with st.expander("Debug details (for validation when numbers differ)"):
-        st.markdown("**Detected 4H candle start times**")
-        st.dataframe(starts, use_container_width=True)
-        st.markdown("**Daily/4H matching sample (includes matched daily date and previous daily candle date)**")
-        st.dataframe(debug, use_container_width=True)
-        st.write(f"Number of matched morning cases: {len(debug):,}")
+        with st.expander("Debug details (for validation when numbers differ)"):
+            st.markdown("**Detected 4H candle start times**")
+            st.dataframe(starts, use_container_width=True)
+            st.markdown("**Daily/4H matching sample (includes matched daily date and previous daily candle date)**")
+            st.dataframe(debug, use_container_width=True)
+            st.write(f"Number of matched morning cases: {len(debug):,}")
+    else:
+        st.info("GER40 4H morning stats skipped (required GER40 daily/4H file unavailable or parse failed).")
 
     st.subheader("4) Uploaded datasets")
     catalog = load_catalog()
