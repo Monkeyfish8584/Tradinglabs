@@ -78,6 +78,11 @@ def sync_dropzone_to_catalog() -> tuple[int, int]:
     return imported, skipped
 
 
+def ensure_dropzone_catalog_synced() -> tuple[int, int]:
+    """Always keep catalog aligned with committed github_data/dropzone files."""
+    return sync_dropzone_to_catalog()
+
+
 def save_upload(uploaded_file) -> dict:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     safe_name = uploaded_file.name.replace("/", "_")
@@ -113,13 +118,14 @@ def main() -> None:
             st.error(f"Upload failed: {exc}")
 
     st.subheader("2) GitHub dropzone files")
-    st.caption("You can commit files into github_data/dropzone/ and sync them into the catalog.")
+    st.caption("Committed files in github_data/dropzone are auto-loaded into the catalog.")
+    imported, skipped = ensure_dropzone_catalog_synced()
     drop_files = list_github_dropzone_files()
     if drop_files:
-        st.write([f.name for f in drop_files])
-        if st.button("Sync dropzone files into catalog"):
-            imported, skipped = sync_dropzone_to_catalog()
-            st.success(f"Sync complete: imported {imported}, skipped {skipped} existing file(s).")
+        dropzone_table = pd.DataFrame([build_metadata(f, source="github_dropzone") for f in drop_files])
+        st.dataframe(dropzone_table[["file_name", "rows", "columns"]], use_container_width=True)
+        if imported:
+            st.success(f"Auto-sync complete: imported {imported}, skipped {skipped} existing file(s).")
     else:
         st.info("No files found in github_data/dropzone yet.")
 
