@@ -159,10 +159,10 @@ def prepare_tradingview_ohlc(df: pd.DataFrame) -> tuple[pd.DataFrame, int]:
         raise ValueError(f"Missing required columns: {missing}")
     out = df[required].copy()
     out = out[out["time"].astype(str).str.lower() != "time"].copy()
-    try:
+    if pd.api.types.is_numeric_dtype(out["time"]):
+        out["time"] = pd.to_datetime(out["time"], unit="s", utc=True, errors="coerce")
+    else:
         out["time"] = pd.to_datetime(out["time"], utc=True, errors="coerce", format="mixed")
-    except TypeError:
-        out["time"] = pd.to_datetime(out["time"], utc=True, errors="coerce")
     for col in ["open", "high", "low", "close"]:
         out[col] = pd.to_numeric(out[col], errors="coerce")
     before = len(out)
