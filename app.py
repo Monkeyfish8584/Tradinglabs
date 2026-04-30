@@ -11,12 +11,8 @@ BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR / "data" / "uploads"
 CATALOG_PATH = BASE_DIR / "data" / "catalog.json"
 GITHUB_DROPZONE = BASE_DIR / "github_data" / "dropzone"
-TARGET_FILES = {
-    "VANTAGE_GER40, 1D.csv": "GER40_1D",
-    "VANTAGE_GER40, 240.csv": "GER40_4H",
-    "BLACKBULL_US30, 1D.csv": "US30_1D",
-    "BLACKBULL_US30, 240.csv": "US30_4H",
-}
+SUPPORTED_INSTRUMENTS = {"GER40", "US30", "UK100"}
+TIMEFRAME_TO_SUFFIX = {"1D": "1D", "4H": "4H", "1H": "1H"}
 
 
 @st.cache_data
@@ -64,6 +60,73 @@ def build_metadata(file_path: Path, source: str) -> dict:
         "columns": int(df.shape[1]),
         "column_names": list(df.columns),
     }
+
+
+def detect_instrument(file_name: str) -> str:
+    upper_name = file_name.upper()
+    if "UK100" in upper_name:
+        return "UK100"
+    if "GER40" in upper_name:
+        return "GER40"
+    if "US30" in upper_name:
+        return "US30"
+    return "UNKNOWN"
+
+
+def detect_timeframe(file_name: str) -> str:
+    upper_name = file_name.upper()
+    if "1D" in upper_name:
+        return "1D"
+    if "240" in upper_name:
+        return "4H"
+    if "60" in upper_name:
+        return "1H"
+    return "UNKNOWN"
+
+
+def file_profile(file_path: Path) -> dict:
+    instrument = detect_instrument(file_path.name)
+    timeframe = detect_timeframe(file_path.name)
+    date_range = "n/a"
+    rows = 0
+    try:
+        cleaned, _ = prepare_tradingview_ohlc(load_dataframe(str(file_path)))
+        rows = int(cleaned.shape[0])
+        if rows:
+            date_range = (
+                f"{cleaned['time'].min().strftime('%Y-%m-%d %H:%M:%S %Z')} → "
+                f"{cleaned['time'].max().strftime('%Y-%m-%d %H:%M:%S %Z')}"
+            )
+    except Exception:
+        pass
+    return {
+        "file_name": file_path.name,
+        "instrument": instrument,
+        "timeframe": timeframe,
+        "rows": rows,
+        "date_range": date_range,
+    }
+
+
+def parse_dropzone_market_files(drop_files: list[Path]) -> tuple[dict[str, pd.DataFrame], list[str], list[str]]:
+    parsed: dict[str, pd.DataFrame] = {}
+    warnings: list[str] = []
+    failures: list[str] = []
+
+    for file_path in drop_files:
+        instrument = detect_instrument(file_path.name)
+        timeframe = detect_timeframe(file_path.name)
+        if instrument not in SUPPORTED_INSTRUMENTS or timeframe not in TIMEFRAME_TO_SUFFIX:
+            continue
+        parsed_key = f"{instrument}_{TIMEFRAME_TO_SUFFIX[timeframe]}"
+        try:
+            cleaned, dropped = prepare_tradingview_ohlc(load_dataframe(str(file_path)))
+            parsed[parsed_key] = cleaned
+            if dropped:
+                warnings.append(f"{file_path.name}: dropped {dropped} row(s) due to invalid/duplicate OHLC data.")
+        except Exception as exc:  # noqa: BLE001
+            failures.append(f"{file_path.name}: failed to parse ({exc})")
+    return parsed, warnings, failures
 
 
 def sync_dropzone_to_catalog() -> tuple[int, int]:
@@ -172,11 +235,11 @@ def compute_4h_attack_stats(
     h4["candle_end_new_york"] = h4["candle_start_new_york"] + pd.Timedelta(hours=4)
     h4["date_london"] = h4["time_london"].dt.date
 
-    if instrument == "GER40":
+    if instrument in {"GER40", "UK100"}:
         session_start = pd.to_datetime("08:00").time()
         session_end = pd.to_datetime("10:00").time()
-        overlap_label = "DAX session overlap candle"
-        next_label = "Next DAX 4H candle"
+        overlap_label = f"{instrument} London session overlap candle"
+        next_label = f"Next {instrument} 4H candle"
     else:
         session_start = pd.to_datetime("14:30").time()
         session_end = pd.to_datetime("16:30").time()
@@ -298,34 +361,25 @@ def main() -> None:
     imported, skipped = ensure_dropzone_catalog_synced()
     drop_files = list_github_dropzone_files()
     if drop_files:
-        dropzone_table = pd.DataFrame([build_metadata(f, source="github_dropzone") for f in drop_files])
-        st.dataframe(dropzone_table[["file_name", "rows", "columns"]], use_container_width=True)
+        dropzone_table = pd.DataFrame([file_profile(f) for f in drop_files])
+        st.dataframe(
+            dropzone_table[["file_name", "instrument", "timeframe", "rows", "date_range"]],
+            use_container_width=True,
+        )
         if imported:
             st.success(f"Auto-sync complete: imported {imported}, skipped {skipped} existing file(s).")
     else:
         st.info("No files found in github_data/dropzone yet.")
 
     st.subheader("3) Previous Day High/Low Attack")
-    focus_files = [GITHUB_DROPZONE / name for name in TARGET_FILES]
-    missing_focus = [p.name for p in focus_files if not p.exists()]
-    if missing_focus:
-        st.error(f"Missing required committed CSV(s): {missing_focus}")
-        return
-
-    parsed: dict[str, pd.DataFrame] = {}
-    failed_files: list[str] = []
-    for name, key in TARGET_FILES.items():
-        try:
-            cleaned, dropped = prepare_tradingview_ohlc(load_dataframe(str(GITHUB_DROPZONE / name)))
-            parsed[key] = cleaned
-            if dropped:
-                st.warning(f"{name}: dropped {dropped} row(s) due to invalid/duplicate OHLC data.")
-        except Exception as exc:  # noqa: BLE001
-            failed_files.append(name)
-            st.error(f"{name}: failed to parse ({exc})")
+    parsed, parse_warnings, parse_failures = parse_dropzone_market_files(drop_files)
+    for warning_msg in parse_warnings:
+        st.warning(warning_msg)
+    for failure_msg in parse_failures:
+        st.error(failure_msg)
 
     st.markdown("#### Asset stats")
-    ger40_tab, us30_tab = st.tabs(["GER40", "US30"])
+    ger40_tab, uk100_tab, us30_tab = st.tabs(["GER40", "UK100", "US30"])
 
     with ger40_tab:
         st.markdown("**Daily attack stats**")
@@ -386,6 +440,38 @@ def main() -> None:
                 st.write(f"Number of matched 4H cases: {len(debug):,}")
         else:
             st.info("US30 4H candle stats skipped (required US30 daily/4H file unavailable or parse failed).")
+
+    with uk100_tab:
+        st.markdown("**Daily attack stats**")
+        if "UK100_1D" in parsed:
+            uk100_daily = compute_daily_attack_stats(parsed["UK100_1D"])
+            st.dataframe(
+                uk100_daily.style.format({"Attack %": "{:.2f}%", "Close Beyond %": "{:.2f}%"}),
+                use_container_width=True,
+            )
+            st.caption("UK100 uses London-session instrument handling (08:00–10:00 Europe/London).")
+        else:
+            st.info("UK100 daily stats skipped (file unavailable or parse failed).")
+
+        st.markdown("**4H candle attack stats (session-specific candles)**")
+        if "UK100_1D" in parsed and "UK100_4H" in parsed:
+            h4_stats, debug = compute_4h_attack_stats(parsed["UK100_1D"], parsed["UK100_4H"], instrument="UK100")
+            st.dataframe(h4_stats.style.format({"Attack %": "{:.2f}%"}), use_container_width=True)
+            st.caption(
+                "UK100 labels only the candle overlapping 08:00–10:00 Europe/London plus the immediate next 4H candle."
+            )
+            with st.expander("Debug details (for validation when numbers differ)"):
+                st.markdown("**Session overlap diagnostics and daily matching details**")
+                st.dataframe(debug, use_container_width=True)
+                st.write(f"Number of matched 4H cases: {len(debug):,}")
+        else:
+            st.info("UK100 4H candle stats skipped (required UK100 daily/4H file unavailable or parse failed).")
+
+        st.markdown("**1H file status (loaded + validated for future 08:00–10:00 precision analysis)**")
+        if "UK100_1H" in parsed:
+            st.success(f"UK100 1H file loaded and validated ({len(parsed['UK100_1H']):,} cleaned rows).")
+        else:
+            st.info("UK100 1H file validation skipped (file unavailable or parse failed).")
 
 
 if __name__ == "__main__":
