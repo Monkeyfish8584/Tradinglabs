@@ -153,24 +153,54 @@ def compute_daily_attack_stats(df_daily: pd.DataFrame) -> pd.DataFrame:
     )
 
 
-def compute_4h_attack_stats(df_daily: pd.DataFrame, df_4h: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+def compute_4h_attack_stats(
+    df_daily: pd.DataFrame, df_4h: pd.DataFrame, instrument: str
+) -> tuple[pd.DataFrame, pd.DataFrame]:
     daily = df_daily.copy()
-    daily["date"] = daily["time"].dt.date
-    daily = daily.set_index("date")
+    daily["time_london"] = daily["time"].dt.tz_convert("Europe/London")
+    daily["date_london"] = daily["time_london"].dt.date
+    daily = daily.set_index("date_london")
 
     h4 = df_4h.copy()
-    h4["date"] = h4["time"].dt.date
-    h4["clock"] = h4["time"].dt.strftime("%H:%M")
-    starts = (
-        h4["clock"]
-        .value_counts()
-        .rename_axis("4H Start Time")
-        .reset_index(name="Count")
-        .sort_values("4H Start Time")
+    h4["time_london"] = h4["time"].dt.tz_convert("Europe/London")
+    h4["time_new_york"] = h4["time"].dt.tz_convert("America/New_York")
+    h4["candle_start_london"] = h4["time_london"]
+    h4["candle_end_london"] = h4["candle_start_london"] + pd.Timedelta(hours=4)
+    h4["candle_start_utc"] = h4["time"]
+    h4["candle_end_utc"] = h4["time"] + pd.Timedelta(hours=4)
+    h4["candle_start_new_york"] = h4["time_new_york"]
+    h4["candle_end_new_york"] = h4["candle_start_new_york"] + pd.Timedelta(hours=4)
+    h4["date_london"] = h4["time_london"].dt.date
+
+    if instrument == "GER40":
+        session_start = pd.to_datetime("08:00").time()
+        session_end = pd.to_datetime("10:00").time()
+        overlap_label = "DAX session overlap candle"
+        next_label = "Next DAX 4H candle"
+    else:
+        session_start = pd.to_datetime("14:30").time()
+        session_end = pd.to_datetime("16:30").time()
+        overlap_label = "US open overlap candle"
+        next_label = "Next US30 4H candle"
+
+    h4["session_start"] = h4["candle_start_london"].dt.normalize() + pd.to_timedelta(
+        session_start.hour, unit="h"
+    ) + pd.to_timedelta(session_start.minute, unit="m")
+    h4["session_end"] = h4["candle_start_london"].dt.normalize() + pd.to_timedelta(
+        session_end.hour, unit="h"
+    ) + pd.to_timedelta(session_end.minute, unit="m")
+    h4["overlaps_instrument_window"] = (h4["candle_start_london"] < h4["session_end"]) & (
+        h4["candle_end_london"] > h4["session_start"]
     )
+    ny_start = h4["candle_start_new_york"].dt.normalize() + pd.Timedelta(hours=9, minutes=30)
+    ny_end = h4["candle_start_new_york"].dt.normalize() + pd.Timedelta(hours=11, minutes=30)
+    h4["overlaps_ny_0930_1130"] = (h4["candle_start_new_york"] < ny_end) & (h4["candle_end_new_york"] > ny_start)
+    h4["session_label"] = pd.NA
+    h4.loc[h4["overlaps_instrument_window"], "session_label"] = overlap_label
+    h4.loc[h4["overlaps_instrument_window"].shift(1, fill_value=False), "session_label"] = next_label
 
     merged = h4.copy()
-    merged["prev_daily_date"] = merged["date"].apply(lambda d: d - pd.Timedelta(days=1))
+    merged["prev_daily_date"] = merged["date_london"].apply(lambda d: d - pd.Timedelta(days=1))
     merged = merged[merged["prev_daily_date"].isin(daily.index)]
     merged["prev_open"] = merged["prev_daily_date"].map(daily["open"])
     merged["prev_close"] = merged["prev_daily_date"].map(daily["close"])
@@ -181,13 +211,14 @@ def compute_4h_attack_stats(df_daily: pd.DataFrame, df_4h: pd.DataFrame) -> tupl
     merged.loc[merged["prev_close"] < merged["prev_open"], "prev_color"] = "red"
 
     rows = []
-    for ctime in sorted(merged["clock"].dropna().unique()):
-        green_sample = merged[(merged["clock"] == ctime) & (merged["prev_color"] == "green")]
+    for label in [overlap_label, next_label]:
+        sample_label = merged[merged["session_label"] == label]
+        green_sample = sample_label[sample_label["prev_color"] == "green"]
         green_success = int((green_sample["high"] > green_sample["prev_high"]).sum())
         green_total = int(green_sample.shape[0])
         rows.append(
             {
-                "4H Candle Start": ctime,
+                "4H Candle": label,
                 "Scenario": "After green prev daily candle → attacks prev daily high",
                 "Total Cases": green_total,
                 "Successful Attacks": green_success,
@@ -195,12 +226,12 @@ def compute_4h_attack_stats(df_daily: pd.DataFrame, df_4h: pd.DataFrame) -> tupl
             }
         )
 
-        red_sample = merged[(merged["clock"] == ctime) & (merged["prev_color"] == "red")]
+        red_sample = sample_label[sample_label["prev_color"] == "red"]
         red_success = int((red_sample["low"] < red_sample["prev_low"]).sum())
         red_total = int(red_sample.shape[0])
         rows.append(
             {
-                "4H Candle Start": ctime,
+                "4H Candle": label,
                 "Scenario": "After red prev daily candle → attacks prev daily low",
                 "Total Cases": red_total,
                 "Successful Attacks": red_success,
@@ -208,8 +239,24 @@ def compute_4h_attack_stats(df_daily: pd.DataFrame, df_4h: pd.DataFrame) -> tupl
             }
         )
 
-    debug_cols = ["time", "clock", "date", "prev_daily_date", "prev_color", "prev_high", "prev_low"]
-    return pd.DataFrame(rows), starts, merged[debug_cols].sort_values("time")
+    debug_cols = [
+        "candle_start_utc",
+        "candle_end_utc",
+        "candle_start_london",
+        "candle_end_london",
+        "candle_start_new_york",
+        "candle_end_new_york",
+        "session_label",
+        "overlaps_instrument_window",
+        "overlaps_ny_0930_1130",
+        "prev_daily_date",
+        "prev_color",
+        "prev_high",
+        "prev_low",
+    ]
+    debug = merged[debug_cols].sort_values("candle_start_utc").copy()
+    debug["detected_instrument"] = instrument
+    return pd.DataFrame(rows), debug
 
 
 def save_upload(uploaded_file) -> dict:
@@ -295,18 +342,16 @@ def main() -> None:
         else:
             st.info("GER40 daily stats skipped (file unavailable or parse failed).")
 
-        st.markdown("**4H candle attack stats (all 4H candles)**")
+        st.markdown("**4H candle attack stats (session-specific candles)**")
         if "GER40_1D" in parsed and "GER40_4H" in parsed:
-            h4_stats, starts, debug = compute_4h_attack_stats(parsed["GER40_1D"], parsed["GER40_4H"])
+            h4_stats, debug = compute_4h_attack_stats(parsed["GER40_1D"], parsed["GER40_4H"], instrument="GER40")
             st.dataframe(h4_stats.style.format({"Attack %": "{:.2f}%"}), use_container_width=True)
             st.caption(
-                "Each 4H start time is evaluated separately; times shown are detected from the GER40 data."
+                "GER40 labels only the candle overlapping 08:00–10:00 Europe/London plus the immediate next 4H candle."
             )
 
             with st.expander("Debug details (for validation when numbers differ)"):
-                st.markdown("**Detected 4H candle start times**")
-                st.dataframe(starts, use_container_width=True)
-                st.markdown("**Daily/4H matching sample (includes matched daily date and previous daily candle date)**")
+                st.markdown("**Session overlap diagnostics and daily matching details**")
                 st.dataframe(debug, use_container_width=True)
                 st.write(f"Number of matched 4H cases: {len(debug):,}")
         else:
@@ -327,18 +372,16 @@ def main() -> None:
         else:
             st.info("US30 daily stats skipped (file unavailable or parse failed).")
 
-        st.markdown("**4H candle attack stats (all 4H candles)**")
+        st.markdown("**4H candle attack stats (session-specific candles)**")
         if "US30_1D" in parsed and "US30_4H" in parsed:
-            h4_stats, starts, debug = compute_4h_attack_stats(parsed["US30_1D"], parsed["US30_4H"])
+            h4_stats, debug = compute_4h_attack_stats(parsed["US30_1D"], parsed["US30_4H"], instrument="US30")
             st.dataframe(h4_stats.style.format({"Attack %": "{:.2f}%"}), use_container_width=True)
             st.caption(
-                "US30 uses its own detected 4H candle start times (which can differ from GER40 session timing)."
+                "US30 labels only the candle overlapping 14:30–16:30 Europe/London plus the immediate next 4H candle."
             )
 
             with st.expander("Debug details (for validation when numbers differ)"):
-                st.markdown("**Detected 4H candle start times**")
-                st.dataframe(starts, use_container_width=True)
-                st.markdown("**Daily/4H matching sample (includes matched daily date and previous daily candle date)**")
+                st.markdown("**Session overlap diagnostics and daily matching details**")
                 st.dataframe(debug, use_container_width=True)
                 st.write(f"Number of matched 4H cases: {len(debug):,}")
         else:
