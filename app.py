@@ -11,7 +11,7 @@ BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR / "data" / "uploads"
 CATALOG_PATH = BASE_DIR / "data" / "catalog.json"
 GITHUB_DROPZONE = BASE_DIR / "github_data" / "dropzone"
-SUPPORTED_INSTRUMENTS = {"GER40", "US30", "UK100"}
+SUPPORTED_INSTRUMENTS = {"GER40", "US30", "US500", "UK100"}
 TIMEFRAME_TO_SUFFIX = {"1D": "1D", "4H": "4H", "1H": "1H"}
 
 
@@ -68,6 +68,8 @@ def detect_instrument(file_name: str) -> str:
         return "UK100"
     if "GER40" in upper_name:
         return "GER40"
+    if "US500" in upper_name:
+        return "US500"
     if "US30" in upper_name:
         return "US30"
     return "UNKNOWN"
@@ -379,7 +381,7 @@ def main() -> None:
         st.error(failure_msg)
 
     st.markdown("#### Asset stats")
-    ger40_tab, uk100_tab, us30_tab = st.tabs(["GER40", "UK100", "US30"])
+    ger40_tab, uk100_tab, us30_tab, us500_tab = st.tabs(["GER40", "UK100", "US30", "US500"])
 
     with ger40_tab:
         st.markdown("**Daily attack stats**")
@@ -440,6 +442,36 @@ def main() -> None:
                 st.write(f"Number of matched 4H cases: {len(debug):,}")
         else:
             st.info("US30 4H candle stats skipped (required US30 daily/4H file unavailable or parse failed).")
+
+    with us500_tab:
+        st.markdown("**Daily attack stats**")
+        if "US500_1D" in parsed:
+            us500_daily = compute_daily_attack_stats(parsed["US500_1D"])
+            st.dataframe(
+                us500_daily.style.format({"Attack %": "{:.2f}%", "Close Beyond %": "{:.2f}%"}),
+                use_container_width=True,
+            )
+            st.caption(
+                "US500: green-candle follow-through is shown by high breaks, red-candle follow-through by low breaks; "
+                "close-beyond columns show stronger continuation confirmation."
+            )
+        else:
+            st.info("US500 daily stats skipped (file unavailable or parse failed).")
+
+        st.markdown("**4H candle attack stats (session-specific candles)**")
+        if "US500_1D" in parsed and "US500_4H" in parsed:
+            h4_stats, debug = compute_4h_attack_stats(parsed["US500_1D"], parsed["US500_4H"], instrument="US500")
+            st.dataframe(h4_stats.style.format({"Attack %": "{:.2f}%"}), use_container_width=True)
+            st.caption(
+                "US500 labels only the candle overlapping 14:30–16:30 Europe/London plus the immediate next 4H candle."
+            )
+
+            with st.expander("Debug details (for validation when numbers differ)"):
+                st.markdown("**Session overlap diagnostics and daily matching details**")
+                st.dataframe(debug, use_container_width=True)
+                st.write(f"Number of matched 4H cases: {len(debug):,}")
+        else:
+            st.info("US500 4H candle stats skipped (required US500 daily/4H file unavailable or parse failed).")
 
     with uk100_tab:
         st.markdown("**Daily attack stats**")
