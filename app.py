@@ -225,8 +225,8 @@ def compute_4h_attack_stats(
     daily = df_daily.copy().sort_values("time").reset_index(drop=True)
     daily["time_london"] = daily["time"].dt.tz_convert("Europe/London")
     daily["daily_start"] = daily["time_london"]
-    daily["daily_end"] = daily["daily_start"].shift(-1)
-    daily = daily.dropna(subset=["daily_end"]).copy()
+    daily["daily_end_london"] = daily["daily_start"].shift(-1)
+    daily = daily.dropna(subset=["daily_end_london"]).copy()
 
     h4 = df_4h.copy().sort_values("time").reset_index(drop=True)
     h4["time_london"] = h4["time"].dt.tz_convert("Europe/London")
@@ -269,19 +269,25 @@ def compute_4h_attack_stats(
             ]:
                 empty_rows.append({"4H Candle Group": label, "Scenario": scenario, "Total Cases": 0, "Successful Attacks": 0, "Attack %": 0.0})
         return pd.DataFrame(empty_rows), pd.DataFrame()
-    daily_match = daily[["daily_start", "daily_end", "time_london", "open", "high", "low", "close"]].sort_values("daily_end")
-    selected["candle_start_london"] = pd.to_datetime(selected["candle_start_london"], utc=True).dt.tz_convert("Europe/London")
-    daily_match["daily_end"] = pd.to_datetime(daily_match["daily_end"], utc=True).dt.tz_convert("Europe/London")
+    daily_match = daily[["daily_start", "daily_end_london", "time_london", "open", "high", "low", "close"]].copy()
+    selected["candle_start_merge"] = pd.to_datetime(selected["candle_start_london"]).dt.tz_localize(None)
+    daily_match["daily_end_merge"] = pd.to_datetime(daily_match["daily_end_london"]).dt.tz_localize(None)
+    selected = selected.dropna(subset=["candle_start_merge"]).copy()
+    daily_match = daily_match.dropna(subset=["daily_end_merge"]).copy()
+    selected["candle_start_merge"] = pd.to_datetime(selected["candle_start_merge"])
+    daily_match["daily_end_merge"] = pd.to_datetime(daily_match["daily_end_merge"])
+    selected = selected.sort_values("candle_start_merge").reset_index(drop=True)
+    daily_match = daily_match.sort_values("daily_end_merge").reset_index(drop=True)
     selected = pd.merge_asof(
-        selected.sort_values("candle_start_london"),
+        selected,
         daily_match,
-        left_on="candle_start_london",
-        right_on="daily_end",
+        left_on="candle_start_merge",
+        right_on="daily_end_merge",
         direction="backward",
         allow_exact_matches=True,
         suffixes=("", "_daily"),
     )
-    selected = selected.dropna(subset=["daily_start", "daily_end"]).copy()
+    selected = selected.dropna(subset=["daily_start", "daily_end_london"]).copy()
     selected["matched_daily_timestamp"] = selected.get("time_london_daily")
     selected["previous_daily_open"] = selected.get("open_daily")
     selected["previous_daily_high"] = selected.get("high_daily")
@@ -331,7 +337,7 @@ def compute_4h_attack_stats(
         "close",
         "matched_daily_timestamp",
         "daily_start",
-        "daily_end",
+        "daily_end_london",
         "previous_daily_open",
         "previous_daily_high",
         "previous_daily_low",
@@ -342,8 +348,12 @@ def compute_4h_attack_stats(
     ]
     debug = selected[debug_cols].sort_values("candle_start_london").copy()
     debug["asset"] = instrument
-    debug["warn_prev_daily_after_4h_start"] = debug["daily_end"] > debug["candle_start_london"]
-    debug["warn_same_containing_daily"] = (debug["daily_start"] <= debug["candle_start_london"]) & (debug["daily_end"] > debug["candle_start_london"])
+    debug["warn_prev_daily_after_4h_start"] = debug["daily_end_london"] > debug["candle_start_london"]
+    debug["warn_same_containing_daily"] = (debug["daily_start"] <= debug["candle_start_london"]) & (debug["daily_end_london"] > debug["candle_start_london"])
+    debug["candle_start_merge_dtype"] = str(selected["candle_start_merge"].dtype)
+    debug["daily_end_merge_dtype"] = str(selected["daily_end_merge"].dtype)
+    debug["first_candle_start_merge"] = selected["candle_start_merge"].iloc[0] if len(selected) else pd.NaT
+    debug["first_daily_end_merge"] = selected["daily_end_merge"].iloc[0] if len(selected) else pd.NaT
     price_ratio = (debug["h4_high"] / debug["previous_daily_high"]).replace([np.inf, -np.inf], np.nan).abs()
     debug["warn_price_scale_mismatch"] = ~price_ratio.between(0.25, 4.0)
     return pd.DataFrame(rows), debug
