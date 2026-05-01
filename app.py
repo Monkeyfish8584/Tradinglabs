@@ -224,7 +224,14 @@ def compute_4h_attack_stats(
     daily = df_daily.copy()
     daily["time_london"] = daily["time"].dt.tz_convert("Europe/London")
     daily["date_london"] = daily["time_london"].dt.date
-    daily = daily.set_index("date_london")
+    daily = daily.sort_values("time_london").reset_index(drop=True)
+    daily["prev_open"] = daily["open"].shift(1)
+    daily["prev_close"] = daily["close"].shift(1)
+    daily["prev_high"] = daily["high"].shift(1)
+    daily["prev_low"] = daily["low"].shift(1)
+    daily_prev = daily[["date_london", "prev_open", "prev_close", "prev_high", "prev_low"]].copy()
+    daily_prev = daily_prev.dropna(subset=["prev_open", "prev_close", "prev_high", "prev_low"])
+    daily_prev = daily_prev.set_index("date_london")
 
     h4 = df_4h.copy()
     h4["time_london"] = h4["time"].dt.tz_convert("Europe/London")
@@ -265,12 +272,12 @@ def compute_4h_attack_stats(
     h4.loc[h4["overlaps_instrument_window"].shift(1, fill_value=False), "session_label"] = next_label
 
     merged = h4.copy()
-    merged["prev_daily_date"] = merged["date_london"].apply(lambda d: d - pd.Timedelta(days=1))
-    merged = merged[merged["prev_daily_date"].isin(daily.index)]
-    merged["prev_open"] = merged["prev_daily_date"].map(daily["open"])
-    merged["prev_close"] = merged["prev_daily_date"].map(daily["close"])
-    merged["prev_high"] = merged["prev_daily_date"].map(daily["high"])
-    merged["prev_low"] = merged["prev_daily_date"].map(daily["low"])
+    merged["prev_daily_date"] = merged["date_london"]
+    merged = merged[merged["prev_daily_date"].isin(daily_prev.index)]
+    merged["prev_open"] = merged["prev_daily_date"].map(daily_prev["prev_open"])
+    merged["prev_close"] = merged["prev_daily_date"].map(daily_prev["prev_close"])
+    merged["prev_high"] = merged["prev_daily_date"].map(daily_prev["prev_high"])
+    merged["prev_low"] = merged["prev_daily_date"].map(daily_prev["prev_low"])
     merged["prev_color"] = pd.Series(pd.NA, index=merged.index, dtype="object")
     merged.loc[merged["prev_close"] > merged["prev_open"], "prev_color"] = "green"
     merged.loc[merged["prev_close"] < merged["prev_open"], "prev_color"] = "red"
@@ -279,7 +286,7 @@ def compute_4h_attack_stats(
     for label in [overlap_label, next_label]:
         sample_label = merged[merged["session_label"] == label]
         green_sample = sample_label[sample_label["prev_color"] == "green"]
-        green_success = int((green_sample["high"] > green_sample["prev_high"]).sum())
+        green_success = int((green_sample["high"] >= green_sample["prev_high"]).sum())
         green_total = int(green_sample.shape[0])
         rows.append(
             {
@@ -292,7 +299,7 @@ def compute_4h_attack_stats(
         )
 
         red_sample = sample_label[sample_label["prev_color"] == "red"]
-        red_success = int((red_sample["low"] < red_sample["prev_low"]).sum())
+        red_success = int((red_sample["low"] <= red_sample["prev_low"]).sum())
         red_total = int(red_sample.shape[0])
         rows.append(
             {
@@ -322,6 +329,151 @@ def compute_4h_attack_stats(
     debug = merged[debug_cols].sort_values("candle_start_utc").copy()
     debug["detected_instrument"] = instrument
     return pd.DataFrame(rows), debug
+
+
+def pct(num: int, den: int) -> float:
+    return (num / den * 100.0) if den else 0.0
+
+
+def compute_sweep_stats(df: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
+    work = df.copy().sort_values("time").reset_index(drop=True)
+    work["prev_high"] = work["high"].shift(1)
+    work["prev_low"] = work["low"].shift(1)
+    work["next_open"] = work["open"].shift(-1)
+    work["next_close"] = work["close"].shift(-1)
+    work = work.dropna(subset=["prev_high", "prev_low", "next_open", "next_close"]).copy()
+
+    high_sweep = (work["high"] > work["prev_high"]) & (work["close"] < work["prev_high"])
+    low_sweep = (work["low"] < work["prev_low"]) & (work["close"] > work["prev_low"])
+    high_next_red = high_sweep & (work["next_close"] < work["next_open"])
+    low_next_green = low_sweep & (work["next_close"] > work["next_open"])
+    high_holds = high_sweep & (work["next_close"] < work["prev_high"])
+    low_holds = low_sweep & (work["next_close"] > work["prev_low"])
+
+    metrics = {
+        "high_total": int(high_sweep.sum()),
+        "high_next_red": int(high_next_red.sum()),
+        "high_holds": int(high_holds.sum()),
+        "low_total": int(low_sweep.sum()),
+        "low_next_green": int(low_next_green.sum()),
+        "low_holds": int(low_holds.sum()),
+    }
+    table = pd.DataFrame(
+        [
+            {"Setup": "High sweep", "Total Cases": metrics["high_total"], "Reversal-Colour Cases": metrics["high_next_red"], "Reversal-Colour %": pct(metrics["high_next_red"], metrics["high_total"]), "Failed-Sweep-Holds Cases": metrics["high_holds"], "Failed-Sweep-Holds %": pct(metrics["high_holds"], metrics["high_total"])},
+            {"Setup": "Low sweep", "Total Cases": metrics["low_total"], "Reversal-Colour Cases": metrics["low_next_green"], "Reversal-Colour %": pct(metrics["low_next_green"], metrics["low_total"]), "Failed-Sweep-Holds Cases": metrics["low_holds"], "Failed-Sweep-Holds %": pct(metrics["low_holds"], metrics["low_total"])},
+        ]
+    )
+    return table, metrics
+
+
+def core_session_mask(df: pd.DataFrame, instrument: str, timeframe: str) -> pd.Series:
+    london = df["time"].dt.tz_convert("Europe/London")
+    if instrument in {"GER40", "UK100"}:
+        if timeframe == "1H":
+            return london.dt.hour.isin([8, 9])
+        session_start_time, session_end_time = pd.to_datetime("08:00").time(), pd.to_datetime("10:00").time()
+    else:
+        if timeframe == "1H":
+            return london.dt.hour.isin([14, 15, 16])
+        session_start_time, session_end_time = pd.to_datetime("14:30").time(), pd.to_datetime("16:30").time()
+    candle_start = london
+    candle_end = london + pd.Timedelta(hours=4)
+    session_start = candle_start.dt.normalize() + pd.to_timedelta(session_start_time.hour, unit="h") + pd.to_timedelta(session_start_time.minute, unit="m")
+    session_end = candle_start.dt.normalize() + pd.to_timedelta(session_end_time.hour, unit="h") + pd.to_timedelta(session_end_time.minute, unit="m")
+    return (candle_start < session_end) & (candle_end > session_start)
+
+
+def render_sweep_sections(parsed: dict[str, pd.DataFrame], instrument: str) -> None:
+    h1_key, h4_key = f"{instrument}_1H", f"{instrument}_4H"
+    h1_df, h4_df = parsed.get(h1_key), parsed.get(h4_key)
+    session_used = "08:00–10:00 Europe/London" if instrument in {"GER40", "UK100"} else "14:30–16:30 Europe/London"
+
+    st.markdown("**1H Sweep / Failed Breakout Stats**")
+    if h1_df is None:
+        st.info("Not enough data loaded to calculate this sweep stat.")
+    else:
+        h1_table, h1_metrics = compute_sweep_stats(h1_df)
+        st.dataframe(h1_table.style.format({"Reversal-Colour %": "{:.2f}%", "Failed-Sweep-Holds %": "{:.2f}%"}), use_container_width=True)
+        with st.expander("Full 1H sweep stats"):
+            st.dataframe(h1_table.style.format({"Reversal-Colour %": "{:.2f}%", "Failed-Sweep-Holds %": "{:.2f}%"}), use_container_width=True)
+
+    st.markdown("**4H Sweep / Failed Breakout Stats**")
+    if h4_df is None:
+        st.info("Not enough data loaded to calculate this sweep stat.")
+    else:
+        h4_table, h4_metrics = compute_sweep_stats(h4_df)
+        st.dataframe(h4_table.style.format({"Reversal-Colour %": "{:.2f}%", "Failed-Sweep-Holds %": "{:.2f}%"}), use_container_width=True)
+        with st.expander("Full 4H sweep stats"):
+            st.dataframe(h4_table.style.format({"Reversal-Colour %": "{:.2f}%", "Failed-Sweep-Holds %": "{:.2f}%"}), use_container_width=True)
+
+    st.markdown("**Core Session Sweep Stats**")
+    core_rows, debug_frames = [], []
+    for tf, key in [("1H", h1_key), ("4H", h4_key)]:
+        df = parsed.get(key)
+        if df is None:
+            continue
+        mask = core_session_mask(df, instrument, tf)
+        core_df = df[mask].copy()
+        table, _metrics = compute_sweep_stats(core_df) if len(core_df) else (pd.DataFrame(), {})
+        for _, r in table.iterrows():
+            core_rows.append({"Timeframe": tf, "Setup": r["Setup"], "Total Cases": int(r["Total Cases"]), "Reversal-Colour Cases": int(r["Reversal-Colour Cases"]), "Reversal-Colour %": r["Reversal-Colour %"], "Failed-Sweep-Holds Cases": int(r["Failed-Sweep-Holds Cases"]), "Failed-Sweep-Holds %": r["Failed-Sweep-Holds %"], "Session Used": session_used})
+        dbg = core_df[["time", "open", "high", "low", "close"]].copy()
+        dbg["time_london"] = core_df["time"].dt.tz_convert("Europe/London")
+        dbg["timeframe"] = tf
+        debug_frames.append(dbg)
+    if core_rows:
+        core_table = pd.DataFrame(core_rows)
+        st.dataframe(core_table.style.format({"Reversal-Colour %": "{:.2f}%", "Failed-Sweep-Holds %": "{:.2f}%"}), use_container_width=True)
+    else:
+        st.info("Not enough data loaded to calculate this sweep stat.")
+
+    st.markdown("**High Probability Sweep Summary**")
+    summary = []
+    label_map = {
+        ("1H", "High sweep", "Failed-Sweep-Holds %"): "1H high sweep → next candle stays below swept high",
+        ("1H", "Low sweep", "Failed-Sweep-Holds %"): "1H low sweep → next candle stays above swept low",
+        ("4H", "High sweep", "Failed-Sweep-Holds %"): "4H high sweep → next candle stays below swept high",
+        ("4H", "Low sweep", "Failed-Sweep-Holds %"): "4H low sweep → next candle stays above swept low",
+    }
+    if core_rows:
+        all_rows = []
+        if h1_df is not None:
+            all_rows += [{"Timeframe": "1H", **r} for r in compute_sweep_stats(h1_df)[0].to_dict("records")]
+        if h4_df is not None:
+            all_rows += [{"Timeframe": "4H", **r} for r in compute_sweep_stats(h4_df)[0].to_dict("records")]
+        for row in all_rows:
+            hold_pct = row["Failed-Sweep-Holds %"]
+            rev_pct = row["Reversal-Colour %"]
+            if hold_pct >= 60:
+                edge = "Strong edge" if hold_pct >= 70 else "Useful edge"
+                txt = label_map[(row["Timeframe"], row["Setup"], "Failed-Sweep-Holds %")]
+                summary.append({"Timeframe": row["Timeframe"], "Signal": txt, "Metric": "Failed-Sweep-Holds %", "Value": hold_pct, "Edge": edge, "Interpretation": "After price sweeps the previous candle high and closes back inside, the next candle often fails to reclaim that swept high." if row["Setup"] == "High sweep" else "After price sweeps the previous candle low and closes back inside, the next candle often holds above that swept low."})
+            if rev_pct >= 60:
+                edge = "Strong edge" if rev_pct >= 70 else "Useful edge"
+                summary.append({"Timeframe": row["Timeframe"], "Signal": f"{row['Timeframe']} {row['Setup'].lower()} → next candle reversal-colour", "Metric": "Reversal-Colour % (weaker)", "Value": rev_pct, "Edge": edge, "Interpretation": "This measures next-candle colour only, so treat it as weaker than the failed-level hold stat."})
+    if summary:
+        st.dataframe(pd.DataFrame(summary).sort_values(["Timeframe", "Metric"]), use_container_width=True)
+    else:
+        st.info("No high-probability sweep stats (>= 60%) found for this asset.")
+
+    with st.expander("Core-session sweep debug"):
+        if debug_frames:
+            st.dataframe(pd.concat(debug_frames, ignore_index=True), use_container_width=True)
+        else:
+            st.info("No core-session rows available.")
+    with st.expander("Data validation details"):
+        rows = []
+        for tf, key in [("1H", h1_key), ("4H", h4_key)]:
+            df = parsed.get(key)
+            if df is None:
+                rows.append({"timeframe": tf, "file_used": "missing", "rows": 0, "date_range": "n/a", "total_sweep_cases": 0, "core_session_sweep_cases": 0})
+                continue
+            totals = compute_sweep_stats(df)[1]
+            core_totals = compute_sweep_stats(df[core_session_mask(df, instrument, tf)])[1] if len(df) else {"high_total": 0, "low_total": 0}
+            rows.append({"timeframe": tf, "file_used": key, "rows": len(df), "date_range": f"{df['time'].min()} -> {df['time'].max()}", "total_sweep_cases": totals["high_total"] + totals["low_total"], "core_session_sweep_cases": core_totals["high_total"] + core_totals["low_total"]})
+        st.write({"asset_selected": instrument, "timezone_conversion_used": "UTC -> Europe/London"})
+        st.dataframe(pd.DataFrame(rows), use_container_width=True)
 
 
 def save_upload(uploaded_file) -> dict:
@@ -412,6 +564,7 @@ def main() -> None:
                 st.write(f"Number of matched 4H cases: {len(debug):,}")
         else:
             st.info("GER40 4H candle stats skipped (required GER40 daily/4H file unavailable or parse failed).")
+        render_sweep_sections(parsed, "GER40")
 
     with us30_tab:
         st.markdown("**Daily attack stats**")
@@ -442,6 +595,7 @@ def main() -> None:
                 st.write(f"Number of matched 4H cases: {len(debug):,}")
         else:
             st.info("US30 4H candle stats skipped (required US30 daily/4H file unavailable or parse failed).")
+        render_sweep_sections(parsed, "US30")
 
     with us500_tab:
         st.markdown("**Daily attack stats**")
@@ -472,6 +626,7 @@ def main() -> None:
                 st.write(f"Number of matched 4H cases: {len(debug):,}")
         else:
             st.info("US500 4H candle stats skipped (required US500 daily/4H file unavailable or parse failed).")
+        render_sweep_sections(parsed, "US500")
 
     with uk100_tab:
         st.markdown("**Daily attack stats**")
@@ -498,6 +653,7 @@ def main() -> None:
                 st.write(f"Number of matched 4H cases: {len(debug):,}")
         else:
             st.info("UK100 4H candle stats skipped (required UK100 daily/4H file unavailable or parse failed).")
+        render_sweep_sections(parsed, "UK100")
 
         st.markdown("**1H file status (loaded + validated for future 08:00–10:00 precision analysis)**")
         if "UK100_1H" in parsed:
