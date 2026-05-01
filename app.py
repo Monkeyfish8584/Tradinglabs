@@ -287,12 +287,36 @@ def compute_4h_attack_stats(
     selected["h4_start_merge"] = selected["h4_start"].dt.tz_localize(None)
     dmerge = daily[["daily_start","daily_end","previous_daily_open","previous_daily_high","previous_daily_low","previous_daily_close","previous_daily_colour"]].copy()
     dmerge["daily_end_merge"] = dmerge["daily_end"].dt.tz_localize(None)
-    selected = selected.sort_values("h4_start_merge")
-    dmerge = dmerge.sort_values("daily_end_merge")
+    selected["h4_start_merge"] = pd.to_datetime(
+        selected["h4_start_merge"],
+        errors="coerce"
+    ).astype("datetime64[ns]")
+    dmerge["daily_end_merge"] = pd.to_datetime(
+        dmerge["daily_end_merge"],
+        errors="coerce"
+    ).astype("datetime64[ns]")
+    selected = selected.dropna(subset=["h4_start_merge"]).copy()
+    dmerge = dmerge.dropna(subset=["daily_end_merge"]).copy()
+    selected = selected.sort_values("h4_start_merge").reset_index(drop=True)
+    dmerge = dmerge.sort_values("daily_end_merge").reset_index(drop=True)
+    if selected["h4_start_merge"].dtype != dmerge["daily_end_merge"].dtype:
+        raise ValueError(
+            f"Merge key dtype mismatch: "
+            f"h4_start_merge={selected['h4_start_merge'].dtype}, "
+            f"daily_end_merge={dmerge['daily_end_merge'].dtype}"
+        )
     # Match each 4H candle to the most recent daily candle that is already completed
     # at 4H open (daily_end <= h4_start). Example: Monday intraday 4H maps to Friday daily
     # until Monday daily has completed.
-    selected = pd.merge_asof(selected, dmerge, left_on="h4_start_merge", right_on="daily_end_merge", direction="backward", allow_exact_matches=True)
+    selected = pd.merge_asof(
+        selected,
+        dmerge,
+        left_on="h4_start_merge",
+        right_on="daily_end_merge",
+        direction="backward",
+        allow_exact_matches=True,
+        suffixes=("", "_daily"),
+    )
     selected = selected.dropna(subset=["daily_start","daily_end"]).copy()
     selected = selected[selected["previous_daily_colour"].isin(["green","red"])].copy()
 
