@@ -254,12 +254,38 @@ def compute_4h_attack_stats(
     h4["h4_end"] = h4["candle_end"]
     h4["h4_open"], h4["h4_high"], h4["h4_low"], h4["h4_close"] = h4["open"], h4["high"], h4["low"], h4["close"]
 
-    sstart, send = (("08:00", "10:00") if instrument in {"GER40", "UK100"} else ("14:30", "16:30"))
-    session_start_td = pd.Timedelta(hours=int(sstart.split(":")[0]), minutes=int(sstart.split(":")[1]))
-    session_end_td = pd.Timedelta(hours=int(send.split(":")[0]), minutes=int(send.split(":")[1]))
-    h4["session_start"] = h4["h4_start"].dt.normalize() + session_start_td
-    h4["session_end"] = h4["h4_start"].dt.normalize() + session_end_td
-    h4["overlaps_session"] = (h4["h4_start"] < h4["session_end"]) & (h4["h4_end"] > h4["session_start"])
+    def get_us_cash_open_london(trade_date: pd.Timestamp) -> pd.Timestamp:
+        ny_open = pd.Timestamp(
+            year=trade_date.year,
+            month=trade_date.month,
+            day=trade_date.day,
+            hour=9,
+            minute=30,
+            tz="America/New_York",
+        )
+        return ny_open.tz_convert("Europe/London")
+
+    if instrument in {"US30", "US500"}:
+        h4["candle_start_london"] = h4["h4_start"]
+        h4["candle_end_london"] = h4["h4_start"] + pd.Timedelta(hours=4)
+        h4["calculated_us_cash_open_london"] = h4["h4_start"].dt.normalize().apply(get_us_cash_open_london)
+        h4["overlaps_session"] = (h4["candle_start_london"] <= h4["calculated_us_cash_open_london"]) & (
+            h4["candle_end_london"] > h4["calculated_us_cash_open_london"]
+        )
+        h4["selected_us_open_candle"] = h4["overlaps_session"]
+        h4["session_start"] = h4["calculated_us_cash_open_london"]
+        h4["session_end"] = h4["calculated_us_cash_open_london"]
+    else:
+        sstart, send = ("08:00", "10:00")
+        session_start_td = pd.Timedelta(hours=int(sstart.split(":")[0]), minutes=int(sstart.split(":")[1]))
+        session_end_td = pd.Timedelta(hours=int(send.split(":")[0]), minutes=int(send.split(":")[1]))
+        h4["session_start"] = h4["h4_start"].dt.normalize() + session_start_td
+        h4["session_end"] = h4["h4_start"].dt.normalize() + session_end_td
+        h4["overlaps_session"] = (h4["h4_start"] < h4["session_end"]) & (h4["h4_end"] > h4["session_start"])
+        h4["candle_start_london"] = h4["h4_start"]
+        h4["candle_end_london"] = h4["h4_end"]
+        h4["calculated_us_cash_open_london"] = pd.NaT
+        h4["selected_us_open_candle"] = False
     h4["trade_day"] = h4["h4_start"].dt.date
     h4 = h4.reset_index(drop=True)
     h4["h4_seq"] = h4.index
@@ -341,7 +367,7 @@ def compute_4h_attack_stats(
         s=paired[paired["previous_daily_colour"]==color]
         rows.append({"4H Candle Group":either_label,"Scenario":scenario,"Total Cases":int(len(s)),"Successful Attacks":int(s["either_success"].sum()),"Attack %":pct(int(s["either_success"].sum()),int(len(s)))})
 
-    debug = selected[["4H Candle Group","h4_start","h4_end","session_start","session_end","overlaps_session","h4_open","h4_high","h4_low","h4_close","daily_start","daily_end","previous_daily_open","previous_daily_high","previous_daily_low","previous_daily_close","previous_daily_colour","target_level","attack_success"]].copy()
+    debug = selected[["4H Candle Group","h4_start","h4_end","session_start","session_end","overlaps_session","candle_start_london","candle_end_london","calculated_us_cash_open_london","selected_us_open_candle","h4_open","h4_high","h4_low","h4_close","daily_start","daily_end","previous_daily_open","previous_daily_high","previous_daily_low","previous_daily_close","previous_daily_colour","target_level","attack_success"]].copy()
     debug.insert(0,"asset",instrument)
     debug = debug.rename(columns={"daily_start":"matched previous daily start","daily_end":"matched previous daily end"})
     debug["warn_prev_daily_after_4h_start"] = debug["matched previous daily end"] > debug["h4_start"]
