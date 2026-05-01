@@ -174,189 +174,155 @@ def prepare_tradingview_ohlc(df: pd.DataFrame) -> tuple[pd.DataFrame, int]:
     return out, dropped
 
 
+
+
+def prepare_ohlc(df: pd.DataFrame, timeframe: str) -> pd.DataFrame:
+    out, _dropped = prepare_tradingview_ohlc(df)
+    out = out.copy()
+    out["time_london"] = out["time"].dt.tz_convert("Europe/London")
+    out = out.sort_values("time_london").reset_index(drop=True)
+    out["candle_start"] = out["time_london"]
+    if timeframe == "1H":
+        out["candle_end"] = out["candle_start"] + pd.Timedelta(hours=1)
+    elif timeframe == "4H":
+        out["candle_end"] = out["candle_start"] + pd.Timedelta(hours=4)
+    elif timeframe == "1D":
+        out["candle_end"] = out["candle_start"].shift(-1)
+    else:
+        raise ValueError(f"Unsupported timeframe for prepare_ohlc: {timeframe}")
+    return out
+
 def compute_daily_attack_stats(df_daily: pd.DataFrame) -> pd.DataFrame:
-    df = df_daily.copy()
-    df["prev_open"] = df["open"].shift(1)
-    df["prev_close"] = df["close"].shift(1)
-    df["prev_high"] = df["high"].shift(1)
-    df["prev_low"] = df["low"].shift(1)
-    df["prev_date"] = df["time"].shift(1).dt.date
-    df = df.dropna(subset=["prev_open", "prev_close", "prev_high", "prev_low"]).copy()
+    df = prepare_ohlc(df_daily, "1D").copy()
+    df["colour"] = "neutral"
+    df.loc[df["close"] > df["open"], "colour"] = "green"
+    df.loc[df["close"] < df["open"], "colour"] = "red"
 
-    prev_green = df["prev_close"] > df["prev_open"]
-    prev_red = df["prev_close"] < df["prev_open"]
+    df["next_high"] = df["high"].shift(-1)
+    df["next_low"] = df["low"].shift(-1)
+    df["next_close"] = df["close"].shift(-1)
 
-    green_total = int(prev_green.sum())
-    green_break = int((prev_green & (df["high"] > df["prev_high"])).sum())
-    green_close_beyond = int((prev_green & (df["close"] > df["prev_high"])).sum())
+    green_cases = df[(df["colour"] == "green") & df["next_high"].notna()].copy()
+    green_success = green_cases["next_high"] >= green_cases["high"]
+    green_close_beyond = green_cases["next_close"] > green_cases["high"]
 
-    red_total = int(prev_red.sum())
-    red_break = int((prev_red & (df["low"] < df["prev_low"])).sum())
-    red_close_beyond = int((prev_red & (df["close"] < df["prev_low"])).sum())
+    red_cases = df[(df["colour"] == "red") & df["next_low"].notna()].copy()
+    red_success = red_cases["next_low"] <= red_cases["low"]
+    red_close_beyond = red_cases["next_close"] < red_cases["low"]
 
-    def pct(num: int, den: int) -> float:
-        return (num / den * 100.0) if den else 0.0
-
-    return pd.DataFrame(
-        [
-            {
-                "Scenario": "Prev daily green → next day breaks prev high",
-                "Total Cases": green_total,
-                "Successful Attacks": green_break,
-                "Attack %": pct(green_break, green_total),
-                "Close Beyond Prev Level": green_close_beyond,
-                "Close Beyond %": pct(green_close_beyond, green_total),
-            },
-            {
-                "Scenario": "Prev daily red → next day breaks prev low",
-                "Total Cases": red_total,
-                "Successful Attacks": red_break,
-                "Attack %": pct(red_break, red_total),
-                "Close Beyond Prev Level": red_close_beyond,
-                "Close Beyond %": pct(red_close_beyond, red_total),
-            },
-        ]
-    )
+    return pd.DataFrame([
+        {
+            "Scenario": "Previous daily green → next day breaks previous high",
+            "Total Cases": int(len(green_cases)),
+            "Successful Attacks": int(green_success.sum()),
+            "Attack %": pct(int(green_success.sum()), int(len(green_cases))),
+            "Close Beyond Prev Level": int(green_close_beyond.sum()),
+            "Close Beyond %": pct(int(green_close_beyond.sum()), int(len(green_cases))),
+        },
+        {
+            "Scenario": "Previous daily red → next day breaks previous low",
+            "Total Cases": int(len(red_cases)),
+            "Successful Attacks": int(red_success.sum()),
+            "Attack %": pct(int(red_success.sum()), int(len(red_cases))),
+            "Close Beyond Prev Level": int(red_close_beyond.sum()),
+            "Close Beyond %": pct(int(red_close_beyond.sum()), int(len(red_cases))),
+        },
+    ])
 
 
 def compute_4h_attack_stats(
     df_daily: pd.DataFrame, df_4h: pd.DataFrame, instrument: str
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
-    daily = df_daily.copy().sort_values("time").reset_index(drop=True)
-    daily["time_london"] = daily["time"].dt.tz_convert("Europe/London")
-    daily["daily_start"] = daily["time_london"]
-    daily["daily_end_london"] = daily["daily_start"].shift(-1)
-    daily = daily.dropna(subset=["daily_end_london"]).copy()
-
-    h4 = df_4h.copy().sort_values("time").reset_index(drop=True)
-    h4["time_london"] = h4["time"].dt.tz_convert("Europe/London")
-    h4["candle_start_london"] = h4["time_london"]
-    h4["candle_end_london"] = h4["candle_start_london"] + pd.Timedelta(hours=4)
-
-    if instrument in {"GER40", "UK100"}:
-        session_start = pd.to_datetime("08:00").time()
-        session_end = pd.to_datetime("10:00").time()
-    else:
-        session_start = pd.to_datetime("14:30").time()
-        session_end = pd.to_datetime("16:30").time()
     overlap_label = "Core-session overlap 4H candle"
     next_label = "Next 4H candle"
     either_label = "Overlap OR next 4H candle"
 
-    h4["session_start"] = h4["candle_start_london"].dt.normalize() + pd.to_timedelta(
-        session_start.hour, unit="h"
-    ) + pd.to_timedelta(session_start.minute, unit="m")
-    h4["session_end"] = h4["candle_start_london"].dt.normalize() + pd.to_timedelta(
-        session_end.hour, unit="h"
-    ) + pd.to_timedelta(session_end.minute, unit="m")
-    h4["overlaps_instrument_window"] = (h4["candle_start_london"] < h4["session_end"]) & (
-        h4["candle_end_london"] > h4["session_start"]
-    )
-    h4["trade_date_london"] = h4["candle_start_london"].dt.date
-    overlap = h4[h4["overlaps_instrument_window"]].groupby("trade_date_london", as_index=False).head(1).copy()
-    overlap["4H Candle Group"] = overlap_label
-    next_c = h4.loc[overlap.index + 1].copy()
-    next_c["4H Candle Group"] = next_label
-    next_c["source_overlap_idx"] = overlap.index.to_numpy()
+    daily = prepare_ohlc(df_daily, "1D").copy()
+    daily["daily_start"] = daily["time_london"]
+    daily["daily_end"] = daily["candle_end"]
+    daily = daily.dropna(subset=["daily_end"]).copy()
+    daily["previous_daily_open"] = daily["open"]
+    daily["previous_daily_high"] = daily["high"]
+    daily["previous_daily_low"] = daily["low"]
+    daily["previous_daily_close"] = daily["close"]
+    daily["previous_daily_colour"] = "neutral"
+    daily.loc[daily["previous_daily_close"] > daily["previous_daily_open"], "previous_daily_colour"] = "green"
+    daily.loc[daily["previous_daily_close"] < daily["previous_daily_open"], "previous_daily_colour"] = "red"
 
-    selected = pd.concat([overlap, next_c], ignore_index=True).sort_values("candle_start_london").reset_index(drop=True)
+    h4 = prepare_ohlc(df_4h, "4H").copy()
+    h4["h4_start"] = h4["time_london"]
+    h4["h4_end"] = h4["candle_end"]
+    h4["h4_open"], h4["h4_high"], h4["h4_low"], h4["h4_close"] = h4["open"], h4["high"], h4["low"], h4["close"]
+
+    sstart, send = (("08:00", "10:00") if instrument in {"GER40", "UK100"} else ("14:30", "16:30"))
+    h4["session_start"] = h4["h4_start"].dt.normalize() + pd.to_timedelta(sstart)
+    h4["session_end"] = h4["h4_start"].dt.normalize() + pd.to_timedelta(send)
+    h4["overlaps_session"] = (h4["h4_start"] < h4["session_end"]) & (h4["h4_end"] > h4["session_start"])
+    h4["trade_day"] = h4["h4_start"].dt.date
+    h4 = h4.reset_index(drop=True)
+    h4["h4_seq"] = h4.index
+
+    overlap = h4[h4["overlaps_session"]].groupby("trade_day", as_index=False).head(1).copy()
+    overlap["4H Candle Group"] = overlap_label
+    overlap["source_overlap_idx"] = overlap["h4_seq"]
+
+    next_h4 = overlap[["source_overlap_idx"]].copy()
+    next_h4["h4_seq"] = next_h4["source_overlap_idx"] + 1
+    next_h4 = next_h4.merge(h4, on="h4_seq", how="left").dropna(subset=["h4_start"]).copy()
+    next_h4["4H Candle Group"] = next_label
+
+    selected = pd.concat([overlap, next_h4], ignore_index=True).sort_values("h4_start").reset_index(drop=True)
     if selected.empty:
-        empty_rows = []
-        for label in [overlap_label, next_label, either_label]:
-            for scenario in [
+        rows=[]
+        for g in [overlap_label,next_label,either_label]:
+            for sc in [
                 "After green prev completed daily candle → attacks prev completed daily high",
                 "After red prev completed daily candle → attacks prev completed daily low",
             ]:
-                empty_rows.append({"4H Candle Group": label, "Scenario": scenario, "Total Cases": 0, "Successful Attacks": 0, "Attack %": 0.0})
-        return pd.DataFrame(empty_rows), pd.DataFrame()
-    daily_match = daily[["daily_start", "daily_end_london", "time_london", "open", "high", "low", "close"]].copy()
-    selected["candle_start_merge"] = pd.to_datetime(selected["candle_start_london"]).dt.tz_localize(None)
-    daily_match["daily_end_merge"] = pd.to_datetime(daily_match["daily_end_london"]).dt.tz_localize(None)
-    selected = selected.dropna(subset=["candle_start_merge"]).copy()
-    daily_match = daily_match.dropna(subset=["daily_end_merge"]).copy()
-    selected["candle_start_merge"] = pd.to_datetime(selected["candle_start_merge"])
-    daily_match["daily_end_merge"] = pd.to_datetime(daily_match["daily_end_merge"])
-    selected = selected.sort_values("candle_start_merge").reset_index(drop=True)
-    daily_match = daily_match.sort_values("daily_end_merge").reset_index(drop=True)
-    selected = pd.merge_asof(
-        selected,
-        daily_match,
-        left_on="candle_start_merge",
-        right_on="daily_end_merge",
-        direction="backward",
-        allow_exact_matches=True,
-        suffixes=("", "_daily"),
-    )
-    selected = selected.dropna(subset=["daily_start", "daily_end_london"]).copy()
-    selected["matched_daily_timestamp"] = selected.get("time_london_daily")
-    selected["previous_daily_open"] = selected.get("open_daily")
-    selected["previous_daily_high"] = selected.get("high_daily")
-    selected["previous_daily_low"] = selected.get("low_daily")
-    selected["previous_daily_close"] = selected.get("close_daily")
-    selected["previous_daily_colour"] = pd.Series(pd.NA, index=selected.index, dtype="object")
-    selected.loc[selected["previous_daily_close"] > selected["previous_daily_open"], "previous_daily_colour"] = "green"
-    selected.loc[selected["previous_daily_close"] < selected["previous_daily_open"], "previous_daily_colour"] = "red"
-    selected = selected[selected["previous_daily_colour"].isin(["green", "red"])].copy()
-    selected["h4_high"] = selected["high"] if "high" in selected.columns else selected.get("high_x")
-    selected["h4_low"] = selected["low"] if "low" in selected.columns else selected.get("low_x")
+                rows.append({"4H Candle Group":g,"Scenario":sc,"Total Cases":0,"Successful Attacks":0,"Attack %":0.0})
+        return pd.DataFrame(rows), pd.DataFrame()
+
+    selected["h4_start_merge"] = selected["h4_start"].dt.tz_localize(None)
+    dmerge = daily[["daily_start","daily_end","previous_daily_open","previous_daily_high","previous_daily_low","previous_daily_close","previous_daily_colour"]].copy()
+    dmerge["daily_end_merge"] = dmerge["daily_end"].dt.tz_localize(None)
+    selected = selected.sort_values("h4_start_merge")
+    dmerge = dmerge.sort_values("daily_end_merge")
+    # Match each 4H candle to the most recent daily candle that is already completed
+    # at 4H open (daily_end <= h4_start). Example: Monday intraday 4H maps to Friday daily
+    # until Monday daily has completed.
+    selected = pd.merge_asof(selected, dmerge, left_on="h4_start_merge", right_on="daily_end_merge", direction="backward", allow_exact_matches=True)
+    selected = selected.dropna(subset=["daily_start","daily_end"]).copy()
+    selected = selected[selected["previous_daily_colour"].isin(["green","red"])].copy()
+
     selected["target_level"] = np.where(selected["previous_daily_colour"].eq("green"), selected["previous_daily_high"], selected["previous_daily_low"])
-    selected["attack_success"] = np.where(
-        selected["previous_daily_colour"].eq("green"),
-        selected["h4_high"] >= selected["previous_daily_high"],
-        selected["h4_low"] <= selected["previous_daily_low"],
-    )
+    selected["attack_success"] = np.where(selected["previous_daily_colour"].eq("green"), selected["h4_high"] >= selected["previous_daily_high"], selected["h4_low"] <= selected["previous_daily_low"])
 
-    rows = []
-    for label in [overlap_label, next_label]:
-        for color, scenario in [
-            ("green", "After green prev completed daily candle → attacks prev completed daily high"),
-            ("red", "After red prev completed daily candle → attacks prev completed daily low"),
-        ]:
-            s = selected[(selected["4H Candle Group"] == label) & (selected["previous_daily_colour"] == color)]
-            rows.append({"4H Candle Group": label, "Scenario": scenario, "Total Cases": int(len(s)), "Successful Attacks": int(s["attack_success"].sum()), "Attack %": pct(int(s["attack_success"].sum()), int(len(s)))})
+    def stats_for(frame, label, color, scenario):
+        s=frame[(frame["4H Candle Group"]==label)&(frame["previous_daily_colour"]==color)]
+        return {"4H Candle Group":label,"Scenario":scenario,"Total Cases":int(len(s)),"Successful Attacks":int(s["attack_success"].sum()),"Attack %":pct(int(s["attack_success"].sum()),int(len(s)))}
 
-    overlap_rows = selected[selected["4H Candle Group"].eq(overlap_label)].copy()
-    next_rows = selected[selected["4H Candle Group"].eq(next_label)].copy()
-    paired = overlap_rows.merge(next_rows[["source_overlap_idx", "attack_success"]], left_on=overlap_rows.index, right_on="source_overlap_idx", how="left", suffixes=("", "_next"))
-    paired["either_success"] = paired["attack_success"] | paired["attack_success_next"].fillna(False)
-    for color, scenario in [("green", "After green prev completed daily candle → attacks prev completed daily high"), ("red", "After red prev completed daily candle → attacks prev completed daily low")]:
-        s = paired[paired["previous_daily_colour"] == color]
-        rows.append({"4H Candle Group": either_label, "Scenario": scenario, "Total Cases": int(len(s)), "Successful Attacks": int(s["either_success"].sum()), "Attack %": pct(int(s["either_success"].sum()), int(len(s)))})
+    rows=[]
+    rows.append(stats_for(selected, overlap_label, "green", "After green prev completed daily candle → attacks prev completed daily high"))
+    rows.append(stats_for(selected, overlap_label, "red", "After red prev completed daily candle → attacks prev completed daily low"))
+    rows.append(stats_for(selected, next_label, "green", "After green prev completed daily candle → attacks prev completed daily high"))
+    rows.append(stats_for(selected, next_label, "red", "After red prev completed daily candle → attacks prev completed daily low"))
 
-    debug_cols = [
-        "4H Candle Group",
-        "time",
-        "candle_start_london",
-        "candle_end_london",
-        "session_start",
-        "session_end",
-        "overlaps_instrument_window",
-        "open",
-        "h4_high",
-        "h4_low",
-        "close",
-        "matched_daily_timestamp",
-        "daily_start",
-        "daily_end_london",
-        "previous_daily_open",
-        "previous_daily_high",
-        "previous_daily_low",
-        "previous_daily_close",
-        "previous_daily_colour",
-        "target_level",
-        "attack_success",
-    ]
-    debug = selected[debug_cols].sort_values("candle_start_london").copy()
-    debug["asset"] = instrument
-    debug["warn_prev_daily_after_4h_start"] = debug["daily_end_london"] > debug["candle_start_london"]
-    debug["warn_same_containing_daily"] = (debug["daily_start"] <= debug["candle_start_london"]) & (debug["daily_end_london"] > debug["candle_start_london"])
-    debug["candle_start_merge_dtype"] = str(selected["candle_start_merge"].dtype)
-    debug["daily_end_merge_dtype"] = str(selected["daily_end_merge"].dtype)
-    debug["first_candle_start_merge"] = selected["candle_start_merge"].iloc[0] if len(selected) else pd.NaT
-    debug["first_daily_end_merge"] = selected["daily_end_merge"].iloc[0] if len(selected) else pd.NaT
-    price_ratio = (debug["h4_high"] / debug["previous_daily_high"]).replace([np.inf, -np.inf], np.nan).abs()
-    debug["warn_price_scale_mismatch"] = ~price_ratio.between(0.25, 4.0)
-    return pd.DataFrame(rows), debug
+    ov=selected[selected["4H Candle Group"].eq(overlap_label)].copy()
+    nx=selected[selected["4H Candle Group"].eq(next_label)][["source_overlap_idx","attack_success"]].copy().rename(columns={"attack_success":"next_attack_success"})
+    paired=ov.merge(nx,on="source_overlap_idx",how="left")
+    paired["either_success"]=paired["attack_success"]|paired["next_attack_success"].fillna(False)
+    for color,scenario in [("green","After green prev completed daily candle → attacks prev completed daily high"),("red","After red prev completed daily candle → attacks prev completed daily low")]:
+        s=paired[paired["previous_daily_colour"]==color]
+        rows.append({"4H Candle Group":either_label,"Scenario":scenario,"Total Cases":int(len(s)),"Successful Attacks":int(s["either_success"].sum()),"Attack %":pct(int(s["either_success"].sum()),int(len(s)))})
+
+    debug = selected[["4H Candle Group","h4_start","h4_end","session_start","session_end","overlaps_session","h4_open","h4_high","h4_low","h4_close","daily_start","daily_end","previous_daily_open","previous_daily_high","previous_daily_low","previous_daily_close","previous_daily_colour","target_level","attack_success"]].copy()
+    debug.insert(0,"asset",instrument)
+    debug = debug.rename(columns={"daily_start":"matched previous daily start","daily_end":"matched previous daily end"})
+    debug["warn_prev_daily_after_4h_start"] = debug["matched previous daily end"] > debug["h4_start"]
+    debug["warn_same_containing_daily"] = (debug["matched previous daily start"] <= debug["h4_start"]) & (debug["matched previous daily end"] > debug["h4_start"])
+    ratio = (debug["h4_high"] / debug["previous_daily_high"]).replace([np.inf, -np.inf], np.nan).abs()
+    debug["warn_price_scale_mismatch"] = ~ratio.between(0.25, 4.0)
+    return pd.DataFrame(rows), debug.sort_values("h4_start")
 
 
 def pct(num: int, den: int) -> float:
