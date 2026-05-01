@@ -260,7 +260,18 @@ def compute_4h_attack_stats(
     next_c["source_overlap_idx"] = overlap.index.to_numpy()
 
     selected = pd.concat([overlap, next_c], ignore_index=True).sort_values("candle_start_london").reset_index(drop=True)
+    if selected.empty:
+        empty_rows = []
+        for label in [overlap_label, next_label, either_label]:
+            for scenario in [
+                "After green prev completed daily candle → attacks prev completed daily high",
+                "After red prev completed daily candle → attacks prev completed daily low",
+            ]:
+                empty_rows.append({"4H Candle Group": label, "Scenario": scenario, "Total Cases": 0, "Successful Attacks": 0, "Attack %": 0.0})
+        return pd.DataFrame(empty_rows), pd.DataFrame()
     daily_match = daily[["daily_start", "daily_end", "time_london", "open", "high", "low", "close"]].sort_values("daily_end")
+    selected["candle_start_london"] = pd.to_datetime(selected["candle_start_london"], utc=True).dt.tz_convert("Europe/London")
+    daily_match["daily_end"] = pd.to_datetime(daily_match["daily_end"], utc=True).dt.tz_convert("Europe/London")
     selected = pd.merge_asof(
         selected.sort_values("candle_start_london"),
         daily_match,
