@@ -268,9 +268,14 @@ def compute_4h_attack_stats(
         right_on="daily_end",
         direction="backward",
         allow_exact_matches=True,
+        suffixes=("", "_daily"),
     )
     selected = selected.dropna(subset=["daily_start", "daily_end"]).copy()
-    selected = selected.rename(columns={"time_london_y": "matched_daily_timestamp", "open_y": "previous_daily_open", "high_y": "previous_daily_high", "low_y": "previous_daily_low", "close_y": "previous_daily_close"})
+    selected["matched_daily_timestamp"] = selected.get("time_london_daily")
+    selected["previous_daily_open"] = selected.get("open_daily")
+    selected["previous_daily_high"] = selected.get("high_daily")
+    selected["previous_daily_low"] = selected.get("low_daily")
+    selected["previous_daily_close"] = selected.get("close_daily")
     selected["previous_daily_colour"] = pd.Series(pd.NA, index=selected.index, dtype="object")
     selected.loc[selected["previous_daily_close"] > selected["previous_daily_open"], "previous_daily_colour"] = "green"
     selected.loc[selected["previous_daily_close"] < selected["previous_daily_open"], "previous_daily_colour"] = "red"
