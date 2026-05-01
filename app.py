@@ -255,8 +255,10 @@ def compute_4h_attack_stats(
     h4["h4_open"], h4["h4_high"], h4["h4_low"], h4["h4_close"] = h4["open"], h4["high"], h4["low"], h4["close"]
 
     sstart, send = (("08:00", "10:00") if instrument in {"GER40", "UK100"} else ("14:30", "16:30"))
-    h4["session_start"] = h4["h4_start"].dt.normalize() + pd.to_timedelta(sstart)
-    h4["session_end"] = h4["h4_start"].dt.normalize() + pd.to_timedelta(send)
+    session_start_td = pd.Timedelta(hours=int(sstart.split(":")[0]), minutes=int(sstart.split(":")[1]))
+    session_end_td = pd.Timedelta(hours=int(send.split(":")[0]), minutes=int(send.split(":")[1]))
+    h4["session_start"] = h4["h4_start"].dt.normalize() + session_start_td
+    h4["session_end"] = h4["h4_start"].dt.normalize() + session_end_td
     h4["overlaps_session"] = (h4["h4_start"] < h4["session_end"]) & (h4["h4_end"] > h4["session_start"])
     h4["trade_day"] = h4["h4_start"].dt.date
     h4 = h4.reset_index(drop=True)
