@@ -413,6 +413,91 @@ def compute_sweep_stats(df: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
     return table, metrics
 
 
+def compute_us_session_4h_sweep_edge(df_4h: pd.DataFrame, instrument: str) -> tuple[pd.DataFrame, pd.DataFrame, dict]:
+    if instrument not in {"US500", "US30"}:
+        return pd.DataFrame(), pd.DataFrame(), {}
+
+    selected_hour = 14 if instrument == "US500" else 15
+    tested_label = "14:00–18:00 Europe/London 4H candle" if instrument == "US500" else "15:00–19:00 Europe/London 4H candle"
+    compared_label = "Immediately previous 4H candle"
+
+    h4 = prepare_ohlc(df_4h, "4H").copy().sort_values("time_london").reset_index(drop=True)
+    h4["candle_start_london"] = h4["time_london"]
+    h4["candle_end_london"] = h4["candle_start_london"] + pd.Timedelta(hours=4)
+    h4["selected_session_candle"] = h4["candle_start_london"].dt.hour.eq(selected_hour)
+    h4["previous_candle_start_london"] = h4["candle_start_london"].shift(1)
+    h4["previous_candle_end_london"] = h4["candle_end_london"].shift(1)
+    h4["previous_high"] = h4["high"].shift(1)
+    h4["previous_low"] = h4["low"].shift(1)
+    h4["selected_high"] = h4["high"]
+    h4["selected_low"] = h4["low"]
+    h4["selected_close"] = h4["close"]
+
+    selected = h4[h4["selected_session_candle"]].dropna(subset=["previous_high", "previous_low"]).copy()
+    selected["breaks_previous_high"] = selected["selected_high"] > selected["previous_high"]
+    selected["breaks_previous_low"] = selected["selected_low"] < selected["previous_low"]
+    selected["breaks_either_side"] = selected["breaks_previous_high"] | selected["breaks_previous_low"]
+    selected["breaks_both_sides"] = selected["breaks_previous_high"] & selected["breaks_previous_low"]
+    selected["high_break_fails"] = selected["breaks_previous_high"] & (selected["selected_close"] < selected["previous_high"])
+    selected["low_break_fails"] = selected["breaks_previous_low"] & (selected["selected_close"] > selected["previous_low"])
+
+    total_cases = int(len(selected))
+    high_break_cases = int(selected["breaks_previous_high"].sum()) if total_cases else 0
+    low_break_cases = int(selected["breaks_previous_low"].sum()) if total_cases else 0
+    either_cases = int(selected["breaks_either_side"].sum()) if total_cases else 0
+    both_cases = int(selected["breaks_both_sides"].sum()) if total_cases else 0
+    high_break_fails = int(selected["high_break_fails"].sum()) if total_cases else 0
+    low_break_fails = int(selected["low_break_fails"].sum()) if total_cases else 0
+
+    result_table = pd.DataFrame(
+        [{
+            "Asset": instrument,
+            "Candle Tested": tested_label,
+            "Compared Against": compared_label,
+            "Total Cases": total_cases,
+            "Breaks Previous High Cases": high_break_cases,
+            "Breaks Previous High %": pct(high_break_cases, total_cases),
+            "Breaks Previous Low Cases": low_break_cases,
+            "Breaks Previous Low %": pct(low_break_cases, total_cases),
+            "Breaks Either Side Cases": either_cases,
+            "Breaks Either Side %": pct(either_cases, total_cases),
+            "Breaks Both Sides Cases": both_cases,
+            "Breaks Both Sides %": pct(both_cases, total_cases),
+            "High Break Fails Cases": high_break_fails,
+            "High Break Fails %": pct(high_break_fails, high_break_cases),
+            "Low Break Fails Cases": low_break_fails,
+            "Low Break Fails %": pct(low_break_fails, low_break_cases),
+        }]
+    )
+
+    debug = selected[
+        [
+            "time",
+            "candle_start_london",
+            "candle_end_london",
+            "selected_session_candle",
+            "previous_candle_start_london",
+            "previous_candle_end_london",
+            "previous_high",
+            "previous_low",
+            "selected_high",
+            "selected_low",
+            "selected_close",
+            "breaks_previous_high",
+            "breaks_previous_low",
+            "breaks_either_side",
+            "breaks_both_sides",
+            "high_break_fails",
+            "low_break_fails",
+        ]
+    ].copy()
+    debug.insert(0, "asset", instrument)
+
+    hour_counts = h4["candle_start_london"].dt.hour.value_counts().sort_index().to_dict()
+    debug_counts = {"selected_hour": selected_hour, "total_h4_rows": int(len(h4)), "selected_rows": total_cases, "london_start_hour_counts": hour_counts}
+    return result_table, debug, debug_counts
+
+
 def core_session_mask(df: pd.DataFrame, instrument: str, timeframe: str) -> pd.Series:
     london = df["time"].dt.tz_convert("Europe/London")
     if instrument in {"GER40", "UK100"}:
@@ -520,6 +605,50 @@ def render_sweep_sections(parsed: dict[str, pd.DataFrame], instrument: str) -> N
             rows.append({"timeframe": tf, "file_used": key, "rows": len(df), "date_range": f"{df['time'].min()} -> {df['time'].max()}", "total_sweep_cases": totals["high_total"] + totals["low_total"], "core_session_sweep_cases": core_totals["high_total"] + core_totals["low_total"]})
         st.write({"asset_selected": instrument, "timezone_conversion_used": "UTC -> Europe/London"})
         st.dataframe(pd.DataFrame(rows), use_container_width=True)
+
+def render_us_session_4h_sweep_edge(parsed: dict[str, pd.DataFrame], instrument: str) -> None:
+    if instrument not in {"US500", "US30"}:
+        return
+    st.markdown("**US Session 4H Sweep Edge**")
+    h4_key = f"{instrument}_4H"
+    h4_df = parsed.get(h4_key)
+    if h4_df is None:
+        st.info("Not enough matching 4H candles found for this asset/session.")
+        return
+
+    table, debug, debug_counts = compute_us_session_4h_sweep_edge(h4_df, instrument)
+    if table.empty or int(table.iloc[0]["Total Cases"]) == 0:
+        st.info("Not enough matching 4H candles found for this asset/session.")
+        st.write(debug_counts)
+        return
+
+    either_pct = float(table.iloc[0]["Breaks Either Side %"])
+    if either_pct >= 90:
+        tendency = "Very strong sweep tendency"
+    elif either_pct >= 70:
+        tendency = "Strong sweep tendency"
+    elif either_pct >= 60:
+        tendency = "Useful sweep tendency"
+    else:
+        tendency = "Weak sweep tendency"
+    candle_wording = "14:00–18:00" if instrument == "US500" else "15:00–19:00"
+    st.success(f"{tendency}: {instrument} {candle_wording} 4H candle swept the previous 4H high or low {either_pct:.2f}% of the time.")
+    st.caption("The edge is the liquidity take, not necessarily the reversal. Once the previous 4H high or low is swept, watch for acceptance versus failure.")
+    st.caption("Failed sweep percentages are calculated separately and should not be treated as the main edge unless they are also above 60%.")
+    st.dataframe(
+        table.style.format({
+            "Breaks Previous High %": "{:.2f}%",
+            "Breaks Previous Low %": "{:.2f}%",
+            "Breaks Either Side %": "{:.2f}%",
+            "Breaks Both Sides %": "{:.2f}%",
+            "High Break Fails %": "{:.2f}%",
+            "Low Break Fails %": "{:.2f}%",
+        }),
+        use_container_width=True,
+    )
+    with st.expander("US Session 4H Sweep Debug"):
+        st.dataframe(debug.head(50), use_container_width=True)
+        st.write(debug_counts)
 
 
 def save_upload(uploaded_file) -> dict:
@@ -781,6 +910,7 @@ def main() -> None:
         else:
             st.info("US30 4H candle stats skipped (required US30 daily/4H file unavailable or parse failed).")
         render_sweep_sections(parsed, "US30")
+        render_us_session_4h_sweep_edge(parsed, "US30")
 
     with us500_tab:
         st.markdown("**Daily attack stats**")
@@ -819,6 +949,7 @@ def main() -> None:
         else:
             st.info("US500 4H candle stats skipped (required US500 daily/4H file unavailable or parse failed).")
         render_sweep_sections(parsed, "US500")
+        render_us_session_4h_sweep_edge(parsed, "US500")
 
     with uk100_tab:
         st.markdown("**Daily attack stats**")
