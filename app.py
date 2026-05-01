@@ -224,7 +224,14 @@ def compute_4h_attack_stats(
     daily = df_daily.copy()
     daily["time_london"] = daily["time"].dt.tz_convert("Europe/London")
     daily["date_london"] = daily["time_london"].dt.date
-    daily = daily.set_index("date_london")
+    daily = daily.sort_values("time_london").reset_index(drop=True)
+    daily["prev_open"] = daily["open"].shift(1)
+    daily["prev_close"] = daily["close"].shift(1)
+    daily["prev_high"] = daily["high"].shift(1)
+    daily["prev_low"] = daily["low"].shift(1)
+    daily_prev = daily[["date_london", "prev_open", "prev_close", "prev_high", "prev_low"]].copy()
+    daily_prev = daily_prev.dropna(subset=["prev_open", "prev_close", "prev_high", "prev_low"])
+    daily_prev = daily_prev.set_index("date_london")
 
     h4 = df_4h.copy()
     h4["time_london"] = h4["time"].dt.tz_convert("Europe/London")
@@ -265,12 +272,12 @@ def compute_4h_attack_stats(
     h4.loc[h4["overlaps_instrument_window"].shift(1, fill_value=False), "session_label"] = next_label
 
     merged = h4.copy()
-    merged["prev_daily_date"] = merged["date_london"].apply(lambda d: d - pd.Timedelta(days=1))
-    merged = merged[merged["prev_daily_date"].isin(daily.index)]
-    merged["prev_open"] = merged["prev_daily_date"].map(daily["open"])
-    merged["prev_close"] = merged["prev_daily_date"].map(daily["close"])
-    merged["prev_high"] = merged["prev_daily_date"].map(daily["high"])
-    merged["prev_low"] = merged["prev_daily_date"].map(daily["low"])
+    merged["prev_daily_date"] = merged["date_london"]
+    merged = merged[merged["prev_daily_date"].isin(daily_prev.index)]
+    merged["prev_open"] = merged["prev_daily_date"].map(daily_prev["prev_open"])
+    merged["prev_close"] = merged["prev_daily_date"].map(daily_prev["prev_close"])
+    merged["prev_high"] = merged["prev_daily_date"].map(daily_prev["prev_high"])
+    merged["prev_low"] = merged["prev_daily_date"].map(daily_prev["prev_low"])
     merged["prev_color"] = pd.Series(pd.NA, index=merged.index, dtype="object")
     merged.loc[merged["prev_close"] > merged["prev_open"], "prev_color"] = "green"
     merged.loc[merged["prev_close"] < merged["prev_open"], "prev_color"] = "red"
@@ -279,7 +286,7 @@ def compute_4h_attack_stats(
     for label in [overlap_label, next_label]:
         sample_label = merged[merged["session_label"] == label]
         green_sample = sample_label[sample_label["prev_color"] == "green"]
-        green_success = int((green_sample["high"] > green_sample["prev_high"]).sum())
+        green_success = int((green_sample["high"] >= green_sample["prev_high"]).sum())
         green_total = int(green_sample.shape[0])
         rows.append(
             {
@@ -292,7 +299,7 @@ def compute_4h_attack_stats(
         )
 
         red_sample = sample_label[sample_label["prev_color"] == "red"]
-        red_success = int((red_sample["low"] < red_sample["prev_low"]).sum())
+        red_success = int((red_sample["low"] <= red_sample["prev_low"]).sum())
         red_total = int(red_sample.shape[0])
         rows.append(
             {
