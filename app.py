@@ -488,6 +488,147 @@ def save_upload(uploaded_file) -> dict:
     return build_metadata(target_path, source="streamlit_upload")
 
 
+
+def session_window_for_instrument(instrument: str) -> str:
+    return "08:00–10:00 Europe/London" if instrument in {"GER40", "UK100"} else "14:30–16:30 Europe/London"
+
+
+def pick_daily_row(stats: pd.DataFrame, prev_color: str) -> pd.Series:
+    if prev_color == "Green":
+        return stats.iloc[0]
+    return stats.iloc[1]
+
+
+def pick_4h_rows(stats: pd.DataFrame, instrument: str, prev_color: str) -> pd.DataFrame:
+    if instrument in {"GER40", "UK100"}:
+        overlap_label = f"{instrument} London session overlap candle"
+        next_label = f"Next {instrument} 4H candle"
+    else:
+        overlap_label = "US open overlap candle"
+        next_label = "Next US30 4H candle"
+    scenario = (
+        "After green prev daily candle → attacks prev daily high"
+        if prev_color == "Green"
+        else "After red prev daily candle → attacks prev daily low"
+    )
+    return stats[(stats["4H Candle"].isin([overlap_label, next_label])) & (stats["Scenario"] == scenario)].copy()
+
+
+def render_trading_view(parsed: dict[str, pd.DataFrame], drop_files: list[Path]) -> None:
+    st.subheader("Pre-Trade Trading View")
+    asset = st.selectbox("Asset", ["GER40", "UK100", "US30", "US500"], index=0)
+    prev_color = st.radio("Previous completed daily candle colour", ["Green", "Red"], horizontal=True)
+    threshold = st.slider("Probability threshold", min_value=50, max_value=90, value=60, step=1) / 100
+
+    window = session_window_for_instrument(asset)
+    target = "Previous Daily High" if prev_color == "Green" else "Previous Daily Low"
+    focus = "upper-liquidity / bullish" if prev_color == "Green" else "lower-liquidity / bearish"
+
+    st.markdown("### Today’s Context")
+    st.info(
+        f"{asset} after a {prev_color.lower()} daily close. Focus area: {target.lower()} during the {window} window. "
+        f"This is a historical bias/stat tool only ({focus} attack context)."
+    )
+
+    daily_key = f"{asset}_1D"
+    h4_key = f"{asset}_4H"
+    h1_key = f"{asset}_1H"
+
+    c1, c2 = st.columns(2)
+    with c1:
+        st.markdown("### Core Session Attack Stat")
+        if daily_key in parsed and h4_key in parsed:
+            h4_stats, _ = compute_4h_attack_stats(parsed[daily_key], parsed[h4_key], instrument=asset)
+            rows = pick_4h_rows(h4_stats, asset, prev_color)
+            overlap_row = rows.iloc[0] if len(rows) else None
+            if overlap_row is not None:
+                cases = int(overlap_row["Total Cases"])
+                success = int(overlap_row["Successful Attacks"])
+                atk = float(overlap_row["Attack %"]) / 100
+                st.metric("Cases", cases)
+                st.metric("Successful attacks", success)
+                st.metric("Attack %", f"{atk*100:.2f}%")
+                st.metric("Meets threshold", "Yes" if atk >= threshold else "No")
+                st.caption(
+                    f"Historically, when the previous {asset} daily candle closed {prev_color.lower()}, "
+                    f"the {window} session attacked the {target.lower()} {atk*100:.2f}% of the time."
+                )
+            else:
+                st.info("Core-session 4H context data not loaded yet.")
+        else:
+            st.info("Core-session 4H context data not loaded yet.")
+
+    with c2:
+        st.markdown("### Full-Day Attack Stat")
+        if daily_key in parsed:
+            d = compute_daily_attack_stats(parsed[daily_key])
+            row = pick_daily_row(d, prev_color)
+            cases = int(row["Total Cases"])
+            success = int(row["Successful Attacks"])
+            atk = float(row["Attack %"]) / 100
+            st.metric("Cases", cases)
+            st.metric("Successful attacks", success)
+            st.metric("Attack %", f"{atk*100:.2f}%")
+            st.caption("Historically, this condition has led to the selected daily liquidity target attack at the rate shown above.")
+        else:
+            st.info("Daily data not loaded yet.")
+
+    st.markdown("### 4H Context")
+    if daily_key in parsed and h4_key in parsed:
+        h4_stats, _ = compute_4h_attack_stats(parsed[daily_key], parsed[h4_key], instrument=asset)
+        rows = pick_4h_rows(h4_stats, asset, prev_color)
+        if len(rows):
+            st.dataframe(rows[["4H Candle", "Total Cases", "Successful Attacks", "Attack %"]].style.format({"Attack %": "{:.2f}%"}), use_container_width=True)
+        else:
+            st.info("4H context data not loaded yet.")
+    else:
+        st.info("4H context data not loaded yet.")
+
+    st.markdown("### High Probability Setups")
+    hp_rows = []
+    if daily_key in parsed:
+        d = compute_daily_attack_stats(parsed[daily_key])
+        r = pick_daily_row(d, prev_color)
+        if float(r["Attack %"]) / 100 >= threshold:
+            hp_rows.append({"Setup": "Full-Day Attack", "Cases": int(r["Total Cases"]), "Attack %": float(r["Attack %"])})
+    if daily_key in parsed and h4_key in parsed:
+        h4_stats, _ = compute_4h_attack_stats(parsed[daily_key], parsed[h4_key], instrument=asset)
+        rows = pick_4h_rows(h4_stats, asset, prev_color)
+        for _, rr in rows.iterrows():
+            if float(rr["Attack %"]) / 100 >= threshold:
+                hp_rows.append({"Setup": rr["4H Candle"], "Cases": int(rr["Total Cases"]), "Attack %": float(rr["Attack %"])})
+    if hp_rows:
+        st.dataframe(pd.DataFrame(hp_rows).style.format({"Attack %": "{:.2f}%"}), use_container_width=True)
+    else:
+        st.info("No high-probability historical setup found for this condition.")
+
+    st.markdown("### Caution Notes")
+    notes = ["This dashboard does not have live data and cannot determine whether a level has already been attacked today.",
+             "This view is a historical bias/stat tool, not a trade signal."]
+    missing = [tf for tf,key in [("1D",daily_key),("4H",h4_key),("1H",h1_key)] if key not in parsed]
+    if missing:
+        notes.append(f"Missing data warning: {', '.join(missing)} file(s) unavailable for {asset}.")
+    # low sample warnings
+    if daily_key in parsed:
+        d = compute_daily_attack_stats(parsed[daily_key])
+        if int(pick_daily_row(d, prev_color)["Total Cases"]) < 30:
+            notes.append("Low sample size warning: fewer than 30 daily cases for this condition.")
+    if daily_key in parsed and h4_key in parsed:
+        h4_stats,_ = compute_4h_attack_stats(parsed[daily_key], parsed[h4_key], instrument=asset)
+        rows = pick_4h_rows(h4_stats, asset, prev_color)
+        if len(rows) and rows["Total Cases"].min() < 30:
+            notes.append("Low sample size warning: fewer than 30 cases in at least one 4H context setup.")
+    providers = set()
+    for f in drop_files:
+        if asset not in f.name.upper():
+            continue
+        parts = f.stem.split('_')
+        providers.add(parts[0].lower())
+    if len(providers) > 1:
+        notes.append("Mixed broker/feed warning: this asset appears to use multiple file/provider naming sources across loaded timeframes.")
+    for n in notes:
+        st.warning(n)
+
 def main() -> None:
     st.set_page_config(page_title="Trading Dashboard Data Hub", layout="wide")
     st.title("Trading Dashboard: Data Upload Hub")
@@ -532,8 +673,11 @@ def main() -> None:
     for failure_msg in parse_failures:
         st.error(failure_msg)
 
-    st.markdown("#### Asset stats")
-    ger40_tab, uk100_tab, us30_tab, us500_tab = st.tabs(["GER40", "UK100", "US30", "US500"])
+    st.markdown("#### Dashboard Tabs")
+    trading_tab, ger40_tab, uk100_tab, us30_tab, us500_tab = st.tabs(["Trading View", "GER40", "UK100", "US30", "US500"])
+
+    with trading_tab:
+        render_trading_view(parsed, drop_files)
 
     with ger40_tab:
         st.markdown("**Daily attack stats**")
