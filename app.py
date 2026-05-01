@@ -651,39 +651,23 @@ def main() -> None:
     st.title("Trading Dashboard: Data Upload Hub")
     st.caption("Upload your trading files now so we can use them to power the dashboard.")
 
-    st.subheader("1) Upload data")
-    uploaded_file = st.file_uploader(
-        "Supported file types: CSV, Parquet",
-        type=["csv", "parquet", "pq"],
-        accept_multiple_files=False,
-    )
+    st.subheader("1) GitHub dropzone files")
+    with st.expander("GitHub dropzone files (click to expand)", expanded=False):
+        st.caption("Committed files in github_data/dropzone are auto-loaded into the catalog.")
+        imported, skipped = ensure_dropzone_catalog_synced()
+        drop_files = list_github_dropzone_files()
+        if drop_files:
+            dropzone_table = pd.DataFrame([file_profile(f) for f in drop_files])
+            st.dataframe(
+                dropzone_table[["file_name", "instrument", "timeframe", "rows", "date_range"]],
+                use_container_width=True,
+            )
+            if imported:
+                st.success(f"Auto-sync complete: imported {imported}, skipped {skipped} existing file(s).")
+        else:
+            st.info("No files found in github_data/dropzone yet.")
 
-    if uploaded_file is not None:
-        try:
-            metadata = save_upload(uploaded_file)
-            catalog = load_catalog()
-            catalog.append(metadata)
-            save_catalog(catalog)
-            st.success(f"Saved {metadata['file_name']} with {metadata['rows']} rows.")
-        except Exception as exc:  # noqa: BLE001
-            st.error(f"Upload failed: {exc}")
-
-    st.subheader("2) GitHub dropzone files")
-    st.caption("Committed files in github_data/dropzone are auto-loaded into the catalog.")
-    imported, skipped = ensure_dropzone_catalog_synced()
-    drop_files = list_github_dropzone_files()
-    if drop_files:
-        dropzone_table = pd.DataFrame([file_profile(f) for f in drop_files])
-        st.dataframe(
-            dropzone_table[["file_name", "instrument", "timeframe", "rows", "date_range"]],
-            use_container_width=True,
-        )
-        if imported:
-            st.success(f"Auto-sync complete: imported {imported}, skipped {skipped} existing file(s).")
-    else:
-        st.info("No files found in github_data/dropzone yet.")
-
-    st.subheader("3) Previous Day High/Low Attack")
+    st.subheader("2) Previous Day High/Low Attack")
     parsed, parse_warnings, parse_failures = parse_dropzone_market_files(drop_files)
     for warning_msg in parse_warnings:
         st.warning(warning_msg)
