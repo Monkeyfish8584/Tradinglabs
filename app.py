@@ -280,11 +280,13 @@ def compute_4h_attack_stats(
     selected.loc[selected["previous_daily_close"] > selected["previous_daily_open"], "previous_daily_colour"] = "green"
     selected.loc[selected["previous_daily_close"] < selected["previous_daily_open"], "previous_daily_colour"] = "red"
     selected = selected[selected["previous_daily_colour"].isin(["green", "red"])].copy()
+    selected["h4_high"] = selected["high"] if "high" in selected.columns else selected.get("high_x")
+    selected["h4_low"] = selected["low"] if "low" in selected.columns else selected.get("low_x")
     selected["target_level"] = np.where(selected["previous_daily_colour"].eq("green"), selected["previous_daily_high"], selected["previous_daily_low"])
     selected["attack_success"] = np.where(
         selected["previous_daily_colour"].eq("green"),
-        selected["high"] >= selected["previous_daily_high"],
-        selected["low"] <= selected["previous_daily_low"],
+        selected["h4_high"] >= selected["previous_daily_high"],
+        selected["h4_low"] <= selected["previous_daily_low"],
     )
 
     rows = []
@@ -313,8 +315,8 @@ def compute_4h_attack_stats(
         "session_end",
         "overlaps_instrument_window",
         "open",
-        "high",
-        "low",
+        "h4_high",
+        "h4_low",
         "close",
         "matched_daily_timestamp",
         "daily_start",
@@ -331,7 +333,7 @@ def compute_4h_attack_stats(
     debug["asset"] = instrument
     debug["warn_prev_daily_after_4h_start"] = debug["daily_end"] > debug["candle_start_london"]
     debug["warn_same_containing_daily"] = (debug["daily_start"] <= debug["candle_start_london"]) & (debug["daily_end"] > debug["candle_start_london"])
-    price_ratio = (debug["high"] / debug["previous_daily_high"]).replace([np.inf, -np.inf], np.nan).abs()
+    price_ratio = (debug["h4_high"] / debug["previous_daily_high"]).replace([np.inf, -np.inf], np.nan).abs()
     debug["warn_price_scale_mismatch"] = ~price_ratio.between(0.25, 4.0)
     return pd.DataFrame(rows), debug
 
