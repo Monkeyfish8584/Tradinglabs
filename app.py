@@ -4,6 +4,7 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 import streamlit as st
 
@@ -221,39 +222,26 @@ def compute_daily_attack_stats(df_daily: pd.DataFrame) -> pd.DataFrame:
 def compute_4h_attack_stats(
     df_daily: pd.DataFrame, df_4h: pd.DataFrame, instrument: str
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
-    daily = df_daily.copy()
+    daily = df_daily.copy().sort_values("time").reset_index(drop=True)
     daily["time_london"] = daily["time"].dt.tz_convert("Europe/London")
-    daily["date_london"] = daily["time_london"].dt.date
-    daily = daily.sort_values("time_london").reset_index(drop=True)
-    daily["prev_open"] = daily["open"].shift(1)
-    daily["prev_close"] = daily["close"].shift(1)
-    daily["prev_high"] = daily["high"].shift(1)
-    daily["prev_low"] = daily["low"].shift(1)
-    daily_prev = daily[["date_london", "prev_open", "prev_close", "prev_high", "prev_low"]].copy()
-    daily_prev = daily_prev.dropna(subset=["prev_open", "prev_close", "prev_high", "prev_low"])
-    daily_prev = daily_prev.set_index("date_london")
+    daily["daily_start"] = daily["time_london"]
+    daily["daily_end"] = daily["daily_start"].shift(-1)
+    daily = daily.dropna(subset=["daily_end"]).copy()
 
-    h4 = df_4h.copy()
+    h4 = df_4h.copy().sort_values("time").reset_index(drop=True)
     h4["time_london"] = h4["time"].dt.tz_convert("Europe/London")
-    h4["time_new_york"] = h4["time"].dt.tz_convert("America/New_York")
     h4["candle_start_london"] = h4["time_london"]
     h4["candle_end_london"] = h4["candle_start_london"] + pd.Timedelta(hours=4)
-    h4["candle_start_utc"] = h4["time"]
-    h4["candle_end_utc"] = h4["time"] + pd.Timedelta(hours=4)
-    h4["candle_start_new_york"] = h4["time_new_york"]
-    h4["candle_end_new_york"] = h4["candle_start_new_york"] + pd.Timedelta(hours=4)
-    h4["date_london"] = h4["time_london"].dt.date
 
     if instrument in {"GER40", "UK100"}:
         session_start = pd.to_datetime("08:00").time()
         session_end = pd.to_datetime("10:00").time()
-        overlap_label = f"{instrument} London session overlap candle"
-        next_label = f"Next {instrument} 4H candle"
     else:
         session_start = pd.to_datetime("14:30").time()
         session_end = pd.to_datetime("16:30").time()
-        overlap_label = "US open overlap candle"
-        next_label = "Next US30 4H candle"
+    overlap_label = "Core-session overlap 4H candle"
+    next_label = "Next 4H candle"
+    either_label = "Overlap OR next 4H candle"
 
     h4["session_start"] = h4["candle_start_london"].dt.normalize() + pd.to_timedelta(
         session_start.hour, unit="h"
@@ -264,70 +252,82 @@ def compute_4h_attack_stats(
     h4["overlaps_instrument_window"] = (h4["candle_start_london"] < h4["session_end"]) & (
         h4["candle_end_london"] > h4["session_start"]
     )
-    ny_start = h4["candle_start_new_york"].dt.normalize() + pd.Timedelta(hours=9, minutes=30)
-    ny_end = h4["candle_start_new_york"].dt.normalize() + pd.Timedelta(hours=11, minutes=30)
-    h4["overlaps_ny_0930_1130"] = (h4["candle_start_new_york"] < ny_end) & (h4["candle_end_new_york"] > ny_start)
-    h4["session_label"] = pd.NA
-    h4.loc[h4["overlaps_instrument_window"], "session_label"] = overlap_label
-    h4.loc[h4["overlaps_instrument_window"].shift(1, fill_value=False), "session_label"] = next_label
+    h4["trade_date_london"] = h4["candle_start_london"].dt.date
+    overlap = h4[h4["overlaps_instrument_window"]].groupby("trade_date_london", as_index=False).head(1).copy()
+    overlap["4H Candle Group"] = overlap_label
+    next_c = h4.loc[overlap.index + 1].copy()
+    next_c["4H Candle Group"] = next_label
+    next_c["source_overlap_idx"] = overlap.index.to_numpy()
 
-    merged = h4.copy()
-    merged["prev_daily_date"] = merged["date_london"]
-    merged = merged[merged["prev_daily_date"].isin(daily_prev.index)]
-    merged["prev_open"] = merged["prev_daily_date"].map(daily_prev["prev_open"])
-    merged["prev_close"] = merged["prev_daily_date"].map(daily_prev["prev_close"])
-    merged["prev_high"] = merged["prev_daily_date"].map(daily_prev["prev_high"])
-    merged["prev_low"] = merged["prev_daily_date"].map(daily_prev["prev_low"])
-    merged["prev_color"] = pd.Series(pd.NA, index=merged.index, dtype="object")
-    merged.loc[merged["prev_close"] > merged["prev_open"], "prev_color"] = "green"
-    merged.loc[merged["prev_close"] < merged["prev_open"], "prev_color"] = "red"
+    selected = pd.concat([overlap, next_c], ignore_index=True).sort_values("candle_start_london").reset_index(drop=True)
+    daily_match = daily[["daily_start", "daily_end", "time_london", "open", "high", "low", "close"]].sort_values("daily_end")
+    selected = pd.merge_asof(
+        selected.sort_values("candle_start_london"),
+        daily_match,
+        left_on="candle_start_london",
+        right_on="daily_end",
+        direction="backward",
+        allow_exact_matches=True,
+    )
+    selected = selected.dropna(subset=["daily_start", "daily_end"]).copy()
+    selected = selected.rename(columns={"time_london_y": "matched_daily_timestamp", "open_y": "previous_daily_open", "high_y": "previous_daily_high", "low_y": "previous_daily_low", "close_y": "previous_daily_close"})
+    selected["previous_daily_colour"] = pd.Series(pd.NA, index=selected.index, dtype="object")
+    selected.loc[selected["previous_daily_close"] > selected["previous_daily_open"], "previous_daily_colour"] = "green"
+    selected.loc[selected["previous_daily_close"] < selected["previous_daily_open"], "previous_daily_colour"] = "red"
+    selected = selected[selected["previous_daily_colour"].isin(["green", "red"])].copy()
+    selected["target_level"] = np.where(selected["previous_daily_colour"].eq("green"), selected["previous_daily_high"], selected["previous_daily_low"])
+    selected["attack_success"] = np.where(
+        selected["previous_daily_colour"].eq("green"),
+        selected["high"] >= selected["previous_daily_high"],
+        selected["low"] <= selected["previous_daily_low"],
+    )
 
     rows = []
     for label in [overlap_label, next_label]:
-        sample_label = merged[merged["session_label"] == label]
-        green_sample = sample_label[sample_label["prev_color"] == "green"]
-        green_success = int((green_sample["high"] >= green_sample["prev_high"]).sum())
-        green_total = int(green_sample.shape[0])
-        rows.append(
-            {
-                "4H Candle": label,
-                "Scenario": "After green prev daily candle → attacks prev daily high",
-                "Total Cases": green_total,
-                "Successful Attacks": green_success,
-                "Attack %": (green_success / green_total * 100.0) if green_total else 0.0,
-            }
-        )
+        for color, scenario in [
+            ("green", "After green prev completed daily candle → attacks prev completed daily high"),
+            ("red", "After red prev completed daily candle → attacks prev completed daily low"),
+        ]:
+            s = selected[(selected["4H Candle Group"] == label) & (selected["previous_daily_colour"] == color)]
+            rows.append({"4H Candle Group": label, "Scenario": scenario, "Total Cases": int(len(s)), "Successful Attacks": int(s["attack_success"].sum()), "Attack %": pct(int(s["attack_success"].sum()), int(len(s)))})
 
-        red_sample = sample_label[sample_label["prev_color"] == "red"]
-        red_success = int((red_sample["low"] <= red_sample["prev_low"]).sum())
-        red_total = int(red_sample.shape[0])
-        rows.append(
-            {
-                "4H Candle": label,
-                "Scenario": "After red prev daily candle → attacks prev daily low",
-                "Total Cases": red_total,
-                "Successful Attacks": red_success,
-                "Attack %": (red_success / red_total * 100.0) if red_total else 0.0,
-            }
-        )
+    overlap_rows = selected[selected["4H Candle Group"].eq(overlap_label)].copy()
+    next_rows = selected[selected["4H Candle Group"].eq(next_label)].copy()
+    paired = overlap_rows.merge(next_rows[["source_overlap_idx", "attack_success"]], left_on=overlap_rows.index, right_on="source_overlap_idx", how="left", suffixes=("", "_next"))
+    paired["either_success"] = paired["attack_success"] | paired["attack_success_next"].fillna(False)
+    for color, scenario in [("green", "After green prev completed daily candle → attacks prev completed daily high"), ("red", "After red prev completed daily candle → attacks prev completed daily low")]:
+        s = paired[paired["previous_daily_colour"] == color]
+        rows.append({"4H Candle Group": either_label, "Scenario": scenario, "Total Cases": int(len(s)), "Successful Attacks": int(s["either_success"].sum()), "Attack %": pct(int(s["either_success"].sum()), int(len(s)))})
 
     debug_cols = [
-        "candle_start_utc",
-        "candle_end_utc",
+        "4H Candle Group",
+        "time",
         "candle_start_london",
         "candle_end_london",
-        "candle_start_new_york",
-        "candle_end_new_york",
-        "session_label",
+        "session_start",
+        "session_end",
         "overlaps_instrument_window",
-        "overlaps_ny_0930_1130",
-        "prev_daily_date",
-        "prev_color",
-        "prev_high",
-        "prev_low",
+        "open",
+        "high",
+        "low",
+        "close",
+        "matched_daily_timestamp",
+        "daily_start",
+        "daily_end",
+        "previous_daily_open",
+        "previous_daily_high",
+        "previous_daily_low",
+        "previous_daily_close",
+        "previous_daily_colour",
+        "target_level",
+        "attack_success",
     ]
-    debug = merged[debug_cols].sort_values("candle_start_utc").copy()
-    debug["detected_instrument"] = instrument
+    debug = selected[debug_cols].sort_values("candle_start_london").copy()
+    debug["asset"] = instrument
+    debug["warn_prev_daily_after_4h_start"] = debug["daily_end"] > debug["candle_start_london"]
+    debug["warn_same_containing_daily"] = (debug["daily_start"] <= debug["candle_start_london"]) & (debug["daily_end"] > debug["candle_start_london"])
+    price_ratio = (debug["high"] / debug["previous_daily_high"]).replace([np.inf, -np.inf], np.nan).abs()
+    debug["warn_price_scale_mismatch"] = ~price_ratio.between(0.25, 4.0)
     return pd.DataFrame(rows), debug
 
 
@@ -500,18 +500,15 @@ def pick_daily_row(stats: pd.DataFrame, prev_color: str) -> pd.Series:
 
 
 def pick_4h_rows(stats: pd.DataFrame, instrument: str, prev_color: str) -> pd.DataFrame:
-    if instrument in {"GER40", "UK100"}:
-        overlap_label = f"{instrument} London session overlap candle"
-        next_label = f"Next {instrument} 4H candle"
-    else:
-        overlap_label = "US open overlap candle"
-        next_label = "Next US30 4H candle"
+    overlap_label = "Core-session overlap 4H candle"
+    next_label = "Next 4H candle"
+    either_label = "Overlap OR next 4H candle"
     scenario = (
-        "After green prev daily candle → attacks prev daily high"
+        "After green prev completed daily candle → attacks prev completed daily high"
         if prev_color == "Green"
-        else "After red prev daily candle → attacks prev daily low"
+        else "After red prev completed daily candle → attacks prev completed daily low"
     )
-    return stats[(stats["4H Candle"].isin([overlap_label, next_label])) & (stats["Scenario"] == scenario)].copy()
+    return stats[(stats["4H Candle Group"].isin([overlap_label, next_label, either_label])) & (stats["Scenario"] == scenario)].copy()
 
 
 def render_trading_view(parsed: dict[str, pd.DataFrame], drop_files: list[Path]) -> None:
@@ -578,7 +575,7 @@ def render_trading_view(parsed: dict[str, pd.DataFrame], drop_files: list[Path])
         h4_stats, _ = compute_4h_attack_stats(parsed[daily_key], parsed[h4_key], instrument=asset)
         rows = pick_4h_rows(h4_stats, asset, prev_color)
         if len(rows):
-            st.dataframe(rows[["4H Candle", "Total Cases", "Successful Attacks", "Attack %"]].style.format({"Attack %": "{:.2f}%"}), use_container_width=True)
+            st.dataframe(rows[["4H Candle Group", "Total Cases", "Successful Attacks", "Attack %"]].style.format({"Attack %": "{:.2f}%"}), use_container_width=True)
         else:
             st.info("4H context data not loaded yet.")
     else:
@@ -596,7 +593,7 @@ def render_trading_view(parsed: dict[str, pd.DataFrame], drop_files: list[Path])
         rows = pick_4h_rows(h4_stats, asset, prev_color)
         for _, rr in rows.iterrows():
             if float(rr["Attack %"]) / 100 >= threshold:
-                hp_rows.append({"Setup": rr["4H Candle"], "Cases": int(rr["Total Cases"]), "Attack %": float(rr["Attack %"])})
+                hp_rows.append({"Setup": rr["4H Candle Group"], "Cases": int(rr["Total Cases"]), "Attack %": float(rr["Attack %"])})
     if hp_rows:
         st.dataframe(pd.DataFrame(hp_rows).style.format({"Attack %": "{:.2f}%"}), use_container_width=True)
     else:
@@ -702,10 +699,17 @@ def main() -> None:
                 "GER40 labels only the candle overlapping 08:00–10:00 Europe/London plus the immediate next 4H candle."
             )
 
-            with st.expander("Debug details (for validation when numbers differ)"):
-                st.markdown("**Session overlap diagnostics and daily matching details**")
-                st.dataframe(debug, use_container_width=True)
+            with st.expander("4H attack matching debug"):
+                st.dataframe(debug.head(200), use_container_width=True)
                 st.write(f"Number of matched 4H cases: {len(debug):,}")
+                if debug["warn_prev_daily_after_4h_start"].any():
+                    st.warning("Validation warning: matched previous daily end is after 4H candle start for some rows.")
+                if debug["warn_same_containing_daily"].any():
+                    st.warning("Validation warning: matched daily appears to be containing day instead of previous completed day for some rows.")
+                if debug["warn_price_scale_mismatch"].any():
+                    st.warning("Validation warning: possible 4H/daily price scale mismatch detected in sample.")
+                if len(debug) < 30:
+                    st.warning("Validation warning: total 4H matched cases are unexpectedly low.")
         else:
             st.info("GER40 4H candle stats skipped (required GER40 daily/4H file unavailable or parse failed).")
         render_sweep_sections(parsed, "GER40")
@@ -733,10 +737,17 @@ def main() -> None:
                 "US30 labels only the candle overlapping 14:30–16:30 Europe/London plus the immediate next 4H candle."
             )
 
-            with st.expander("Debug details (for validation when numbers differ)"):
-                st.markdown("**Session overlap diagnostics and daily matching details**")
-                st.dataframe(debug, use_container_width=True)
+            with st.expander("4H attack matching debug"):
+                st.dataframe(debug.head(200), use_container_width=True)
                 st.write(f"Number of matched 4H cases: {len(debug):,}")
+                if debug["warn_prev_daily_after_4h_start"].any():
+                    st.warning("Validation warning: matched previous daily end is after 4H candle start for some rows.")
+                if debug["warn_same_containing_daily"].any():
+                    st.warning("Validation warning: matched daily appears to be containing day instead of previous completed day for some rows.")
+                if debug["warn_price_scale_mismatch"].any():
+                    st.warning("Validation warning: possible 4H/daily price scale mismatch detected in sample.")
+                if len(debug) < 30:
+                    st.warning("Validation warning: total 4H matched cases are unexpectedly low.")
         else:
             st.info("US30 4H candle stats skipped (required US30 daily/4H file unavailable or parse failed).")
         render_sweep_sections(parsed, "US30")
@@ -764,10 +775,17 @@ def main() -> None:
                 "US500 labels only the candle overlapping 14:30–16:30 Europe/London plus the immediate next 4H candle."
             )
 
-            with st.expander("Debug details (for validation when numbers differ)"):
-                st.markdown("**Session overlap diagnostics and daily matching details**")
-                st.dataframe(debug, use_container_width=True)
+            with st.expander("4H attack matching debug"):
+                st.dataframe(debug.head(200), use_container_width=True)
                 st.write(f"Number of matched 4H cases: {len(debug):,}")
+                if debug["warn_prev_daily_after_4h_start"].any():
+                    st.warning("Validation warning: matched previous daily end is after 4H candle start for some rows.")
+                if debug["warn_same_containing_daily"].any():
+                    st.warning("Validation warning: matched daily appears to be containing day instead of previous completed day for some rows.")
+                if debug["warn_price_scale_mismatch"].any():
+                    st.warning("Validation warning: possible 4H/daily price scale mismatch detected in sample.")
+                if len(debug) < 30:
+                    st.warning("Validation warning: total 4H matched cases are unexpectedly low.")
         else:
             st.info("US500 4H candle stats skipped (required US500 daily/4H file unavailable or parse failed).")
         render_sweep_sections(parsed, "US500")
@@ -791,10 +809,17 @@ def main() -> None:
             st.caption(
                 "UK100 labels only the candle overlapping 08:00–10:00 Europe/London plus the immediate next 4H candle."
             )
-            with st.expander("Debug details (for validation when numbers differ)"):
-                st.markdown("**Session overlap diagnostics and daily matching details**")
-                st.dataframe(debug, use_container_width=True)
+            with st.expander("4H attack matching debug"):
+                st.dataframe(debug.head(200), use_container_width=True)
                 st.write(f"Number of matched 4H cases: {len(debug):,}")
+                if debug["warn_prev_daily_after_4h_start"].any():
+                    st.warning("Validation warning: matched previous daily end is after 4H candle start for some rows.")
+                if debug["warn_same_containing_daily"].any():
+                    st.warning("Validation warning: matched daily appears to be containing day instead of previous completed day for some rows.")
+                if debug["warn_price_scale_mismatch"].any():
+                    st.warning("Validation warning: possible 4H/daily price scale mismatch detected in sample.")
+                if len(debug) < 30:
+                    st.warning("Validation warning: total 4H matched cases are unexpectedly low.")
         else:
             st.info("UK100 4H candle stats skipped (required UK100 daily/4H file unavailable or parse failed).")
         render_sweep_sections(parsed, "UK100")
