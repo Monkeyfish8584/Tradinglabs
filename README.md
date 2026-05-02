@@ -32,3 +32,15 @@ If you want a simple GitHub area to save files immediately, use `github_data/dro
 - Commit and push to GitHub.
 - In the app, click **Sync dropzone files into catalog** to register them for preview/charting.
 
+
+## Precomputed stats workflow
+
+To keep Streamlit fast, heavy stat calculations are precomputed and committed.
+
+1. Update TradingView CSV files in `github_data/dropzone/`.
+2. Run:
+   ```bash
+   python scripts/precompute_stats.py
+   ```
+3. Commit the updated files under `data/precomputed/`.
+4. Run Streamlit (`streamlit run app.py`) — the app reads precomputed stats and loads quickly.

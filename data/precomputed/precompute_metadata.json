@@ -1,7 +1,7 @@
 {
-  "precomputed_at_utc": "2026-05-02T15:02:26.589921+00:00",
+  "precomputed_at_utc": "2026-05-02T15:09:55.528070+00:00",
   "script": "scripts/precompute_stats.py",
-  "git_commit": "a6a3ac0dc2fddf0b674846465149ec2c2f2a5971",
+  "git_commit": "76a56a3731daca0f55ab7fa20dfb0d412e12162c",
   "input_files": [
     {
       "file": "github_data/dropzone/BLACKBULL_US30, 1D.csv",

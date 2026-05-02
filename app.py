@@ -982,6 +982,10 @@ def main() -> None:
     use_precomputed = has_all_precomputed(precomputed) and not ENABLE_LIVE_RECALC
     if use_precomputed:
         st.caption("Stats loaded from precomputed files. Re-run scripts/precompute_stats.py after updating CSV data.")
+        meta = precomputed.get("meta") or {}
+        ts = meta.get("precomputed_at_utc")
+        if ts:
+            st.info(f"Precomputed timestamp (UTC): {ts}")
     elif not ENABLE_LIVE_RECALC:
         st.error("Precomputed stats not found. Run scripts/precompute_stats.py to generate them.")
     for warning_msg in parse_warnings:
@@ -993,8 +997,13 @@ def main() -> None:
     trading_tab, ger40_tab, uk100_tab, us30_tab, us500_tab = st.tabs(["Trading View", "GER40", "UK100", "US30", "US500"])
 
     with trading_tab:
-        render_trading_view(parsed, drop_files)
-        render_1h_daily_bias_continuation_sweep_edge(parsed, show_debug=True)
+        if use_precomputed:
+            st.markdown("### Precomputed Mode")
+            st.caption("Live stat recalculation is disabled. Set ENABLE_LIVE_RECALC=true for development-only live recompute.")
+            st.dataframe(precomputed["daily"].style.format({"Attack %": "{:.2f}%", "Close Beyond %": "{:.2f}%"}), use_container_width=True)
+        else:
+            render_trading_view(parsed, drop_files)
+            render_1h_daily_bias_continuation_sweep_edge(parsed, show_debug=True)
 
     def render_asset_tab(asset: str):
         st.markdown("### 1) Daily Attack Stats")
