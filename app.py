@@ -12,11 +12,35 @@ BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR / "data" / "uploads"
 CATALOG_PATH = BASE_DIR / "data" / "catalog.json"
 GITHUB_DROPZONE = BASE_DIR / "github_data" / "dropzone"
+PRECOMPUTED_DIR = BASE_DIR / "data" / "precomputed"
+ENABLE_LIVE_RECALC = str(__import__("os").environ.get("ENABLE_LIVE_RECALC", "false")).lower() == "true"
 SUPPORTED_INSTRUMENTS = {"GER40", "US30", "US500", "UK100"}
 TIMEFRAME_TO_SUFFIX = {"1D": "1D", "4H": "4H", "1H": "1H"}
 
 
 @st.cache_data
+
+
+def load_precomputed_tables() -> dict[str, pd.DataFrame | dict | None]:
+    files = {
+        "daily": "daily_attack_stats.csv",
+        "h4_attack": "h4_daily_bias_attack_stats.csv",
+        "generic": "generic_sweep_stats.csv",
+        "core": "core_session_sweep_stats.csv",
+        "us4h": "us_session_4h_sweep_edge.csv",
+        "h1_cont": "h1_daily_bias_continuation_sweep_edge.csv",
+    }
+    out: dict[str, pd.DataFrame | dict | None] = {}
+    for k, name in files.items():
+        fp = PRECOMPUTED_DIR / name
+        out[k] = pd.read_csv(fp) if fp.exists() else None
+    meta = PRECOMPUTED_DIR / "precompute_metadata.json"
+    out["meta"] = json.loads(meta.read_text(encoding="utf-8")) if meta.exists() else None
+    return out
+
+
+def has_all_precomputed(tables: dict[str, pd.DataFrame | dict | None]) -> bool:
+    return all(tables.get(k) is not None for k in ["daily","h4_attack","generic","core","us4h","h1_cont"])
 def load_dataframe(path: str) -> pd.DataFrame:
     file_path = Path(path)
     if file_path.suffix.lower() == ".csv":
@@ -954,6 +978,12 @@ def main() -> None:
 
     st.subheader("2) Previous Day High/Low Attack")
     parsed, parse_warnings, parse_failures = parse_dropzone_market_files(drop_files)
+    precomputed = load_precomputed_tables()
+    use_precomputed = has_all_precomputed(precomputed) and not ENABLE_LIVE_RECALC
+    if use_precomputed:
+        st.caption("Stats loaded from precomputed files. Re-run scripts/precompute_stats.py after updating CSV data.")
+    elif not ENABLE_LIVE_RECALC:
+        st.error("Precomputed stats not found. Run scripts/precompute_stats.py to generate them.")
     for warning_msg in parse_warnings:
         st.warning(warning_msg)
     for failure_msg in parse_failures:
@@ -966,165 +996,43 @@ def main() -> None:
         render_trading_view(parsed, drop_files)
         render_1h_daily_bias_continuation_sweep_edge(parsed, show_debug=True)
 
+    def render_asset_tab(asset: str):
+        st.markdown("### 1) Daily Attack Stats")
+        if use_precomputed:
+            st.dataframe(precomputed["daily"].query("Asset == @asset").style.format({"Attack %": "{:.2f}%", "Close Beyond %": "{:.2f}%"}), use_container_width=True)
+            st.markdown("### 2) 4H Daily-Bias Attack Stats")
+            st.dataframe(precomputed["h4_attack"].query("Asset == @asset").style.format({"Attack %": "{:.2f}%"}), use_container_width=True)
+            st.markdown("### 3) 1H Daily-Bias Continuation Sweep Edge")
+            labels={"GER40":"GER40 / DAX","UK100":"UK100","US30":"US30","US500":"US500"}
+            cont=precomputed["h1_cont"].query("Asset == @labels[asset]")
+            st.dataframe(cont.style.format({"Success %": lambda v: "N/A" if pd.isna(v) else f"{v:.2f}%"}), use_container_width=True)
+            st.markdown("### 4) Generic Sweep / Failed Breakout Stats")
+            st.dataframe(precomputed["generic"].query("Asset == @asset").style.format({"Reversal-Colour %": "{:.2f}%", "Failed-Sweep-Holds %": "{:.2f}%"}), use_container_width=True)
+            st.markdown("### 5) Core Session Sweep Stats")
+            st.dataframe(precomputed["core"].query("Asset == @asset").style.format({"Reversal-Colour %": "{:.2f}%", "Failed-Sweep-Holds %": "{:.2f}%"}), use_container_width=True)
+            st.markdown("### 6) US Session 4H Sweep Edge")
+            us=precomputed["us4h"].query("Asset == @asset") if asset in ["US30","US500"] else pd.DataFrame()
+            st.dataframe(us.style.format({"Breaks Previous High %": "{:.2f}%", "Breaks Previous Low %": "{:.2f}%", "Breaks Either Side %": "{:.2f}%", "Breaks Both Sides %": "{:.2f}%", "High Break Fails %": "{:.2f}%", "Low Break Fails %": "{:.2f}%"}), use_container_width=True) if not us.empty else st.info("US Session 4H Sweep Edge applies only to US30 and US500.")
+            st.markdown("### 7) Debug / Validation")
+            st.json(precomputed.get("meta") or {})
+        elif ENABLE_LIVE_RECALC:
+            st.info("Live recalculation enabled (ENABLE_LIVE_RECALC=true).")
+            # fallback to existing runtime sections
+            daily_key=f"{asset}_1D"
+            if daily_key in parsed:
+                st.dataframe(compute_daily_attack_stats(parsed[daily_key]).style.format({"Attack %":"{:.2f}%","Close Beyond %":"{:.2f}%"}), use_container_width=True)
+
     with ger40_tab:
-        st.markdown("### 1) Daily Attack Stats")
-        if "GER40_1D" in parsed:
-            ger40_daily = compute_daily_attack_stats(parsed["GER40_1D"])
-            st.dataframe(
-                ger40_daily.style.format({"Attack %": "{:.2f}%", "Close Beyond %": "{:.2f}%"}),
-                use_container_width=True,
-            )
-            st.caption(
-                "GER40: green-candle follow-through is shown by high breaks, red-candle follow-through by low breaks; "
-                "close-beyond columns show stronger continuation confirmation."
-            )
-        else:
-            st.info("GER40 daily stats skipped (file unavailable or parse failed).")
-
-        st.markdown("### 2) 4H Daily-Level Attack Stats")
-        if "GER40_1D" in parsed and "GER40_4H" in parsed:
-            h4_stats, debug = compute_4h_attack_stats(parsed["GER40_1D"], parsed["GER40_4H"], instrument="GER40")
-            st.dataframe(h4_stats.style.format({"Attack %": "{:.2f}%"}), use_container_width=True)
-            st.caption(
-                "GER40 labels only the candle overlapping 08:00–10:00 Europe/London plus the immediate next 4H candle."
-            )
-
-            with st.expander("4H attack matching debug"):
-                st.dataframe(debug.head(200), use_container_width=True)
-                st.write(f"Number of matched 4H cases: {len(debug):,}")
-                if debug["warn_prev_daily_after_4h_start"].any():
-                    st.warning("Validation warning: matched previous daily end is after 4H candle start for some rows.")
-                if debug["warn_same_containing_daily"].any():
-                    st.warning("Validation warning: matched daily appears to be containing day instead of previous completed day for some rows.")
-                if debug["warn_price_scale_mismatch"].any():
-                    st.warning("Validation warning: possible 4H/daily price scale mismatch detected in sample.")
-                if len(debug) < 30:
-                    st.warning("Validation warning: total 4H matched cases are unexpectedly low.")
-        else:
-            st.info("GER40 4H candle stats skipped (required GER40 daily/4H file unavailable or parse failed).")
-        render_1h_daily_bias_continuation_sweep_edge(parsed, instrument="GER40", show_debug=True)
-        render_sweep_sections(parsed, "GER40")
-
-    with us30_tab:
-        st.markdown("### 1) Daily Attack Stats")
-        if "US30_1D" in parsed:
-            us30_daily = compute_daily_attack_stats(parsed["US30_1D"])
-            st.dataframe(
-                us30_daily.style.format({"Attack %": "{:.2f}%", "Close Beyond %": "{:.2f}%"}),
-                use_container_width=True,
-            )
-            st.caption(
-                "US30: green-candle follow-through is shown by high breaks, red-candle follow-through by low breaks; "
-                "close-beyond columns show stronger continuation confirmation."
-            )
-        else:
-            st.info("US30 daily stats skipped (file unavailable or parse failed).")
-
-        st.markdown("### 2) 4H Daily-Level Attack Stats")
-        if "US30_1D" in parsed and "US30_4H" in parsed:
-            h4_stats, debug = compute_4h_attack_stats(parsed["US30_1D"], parsed["US30_4H"], instrument="US30")
-            st.dataframe(h4_stats.style.format({"Attack %": "{:.2f}%"}), use_container_width=True)
-            st.caption(
-                "US30 labels only the candle overlapping 14:30–16:30 Europe/London plus the immediate next 4H candle."
-            )
-
-            with st.expander("4H attack matching debug"):
-                st.dataframe(debug.head(200), use_container_width=True)
-                st.write(f"Number of matched 4H cases: {len(debug):,}")
-                if debug["warn_prev_daily_after_4h_start"].any():
-                    st.warning("Validation warning: matched previous daily end is after 4H candle start for some rows.")
-                if debug["warn_same_containing_daily"].any():
-                    st.warning("Validation warning: matched daily appears to be containing day instead of previous completed day for some rows.")
-                if debug["warn_price_scale_mismatch"].any():
-                    st.warning("Validation warning: possible 4H/daily price scale mismatch detected in sample.")
-                if len(debug) < 30:
-                    st.warning("Validation warning: total 4H matched cases are unexpectedly low.")
-        else:
-            st.info("US30 4H candle stats skipped (required US30 daily/4H file unavailable or parse failed).")
-        render_1h_daily_bias_continuation_sweep_edge(parsed, instrument="US30", show_debug=True)
-        render_sweep_sections(parsed, "US30")
-        render_us_session_4h_sweep_edge(parsed, "US30")
-
-    with us500_tab:
-        st.markdown("### 1) Daily Attack Stats")
-        if "US500_1D" in parsed:
-            us500_daily = compute_daily_attack_stats(parsed["US500_1D"])
-            st.dataframe(
-                us500_daily.style.format({"Attack %": "{:.2f}%", "Close Beyond %": "{:.2f}%"}),
-                use_container_width=True,
-            )
-            st.caption(
-                "US500: green-candle follow-through is shown by high breaks, red-candle follow-through by low breaks; "
-                "close-beyond columns show stronger continuation confirmation."
-            )
-        else:
-            st.info("US500 daily stats skipped (file unavailable or parse failed).")
-
-        st.markdown("### 2) 4H Daily-Level Attack Stats")
-        if "US500_1D" in parsed and "US500_4H" in parsed:
-            h4_stats, debug = compute_4h_attack_stats(parsed["US500_1D"], parsed["US500_4H"], instrument="US500")
-            st.dataframe(h4_stats.style.format({"Attack %": "{:.2f}%"}), use_container_width=True)
-            st.caption(
-                "US500 labels only the candle overlapping 14:30–16:30 Europe/London plus the immediate next 4H candle."
-            )
-
-            with st.expander("4H attack matching debug"):
-                st.dataframe(debug.head(200), use_container_width=True)
-                st.write(f"Number of matched 4H cases: {len(debug):,}")
-                if debug["warn_prev_daily_after_4h_start"].any():
-                    st.warning("Validation warning: matched previous daily end is after 4H candle start for some rows.")
-                if debug["warn_same_containing_daily"].any():
-                    st.warning("Validation warning: matched daily appears to be containing day instead of previous completed day for some rows.")
-                if debug["warn_price_scale_mismatch"].any():
-                    st.warning("Validation warning: possible 4H/daily price scale mismatch detected in sample.")
-                if len(debug) < 30:
-                    st.warning("Validation warning: total 4H matched cases are unexpectedly low.")
-        else:
-            st.info("US500 4H candle stats skipped (required US500 daily/4H file unavailable or parse failed).")
-        render_1h_daily_bias_continuation_sweep_edge(parsed, instrument="US500", show_debug=True)
-        render_sweep_sections(parsed, "US500")
-        render_us_session_4h_sweep_edge(parsed, "US500")
+        render_asset_tab("GER40")
 
     with uk100_tab:
-        st.markdown("### 1) Daily Attack Stats")
-        if "UK100_1D" in parsed:
-            uk100_daily = compute_daily_attack_stats(parsed["UK100_1D"])
-            st.dataframe(
-                uk100_daily.style.format({"Attack %": "{:.2f}%", "Close Beyond %": "{:.2f}%"}),
-                use_container_width=True,
-            )
-            st.caption("UK100 uses London-session instrument handling (08:00–10:00 Europe/London).")
-        else:
-            st.info("UK100 daily stats skipped (file unavailable or parse failed).")
+        render_asset_tab("UK100")
 
-        st.markdown("### 2) 4H Daily-Level Attack Stats")
-        if "UK100_1D" in parsed and "UK100_4H" in parsed:
-            h4_stats, debug = compute_4h_attack_stats(parsed["UK100_1D"], parsed["UK100_4H"], instrument="UK100")
-            st.dataframe(h4_stats.style.format({"Attack %": "{:.2f}%"}), use_container_width=True)
-            st.caption(
-                "UK100 labels only the candle overlapping 08:00–10:00 Europe/London plus the immediate next 4H candle."
-            )
-            with st.expander("4H attack matching debug"):
-                st.dataframe(debug.head(200), use_container_width=True)
-                st.write(f"Number of matched 4H cases: {len(debug):,}")
-                if debug["warn_prev_daily_after_4h_start"].any():
-                    st.warning("Validation warning: matched previous daily end is after 4H candle start for some rows.")
-                if debug["warn_same_containing_daily"].any():
-                    st.warning("Validation warning: matched daily appears to be containing day instead of previous completed day for some rows.")
-                if debug["warn_price_scale_mismatch"].any():
-                    st.warning("Validation warning: possible 4H/daily price scale mismatch detected in sample.")
-                if len(debug) < 30:
-                    st.warning("Validation warning: total 4H matched cases are unexpectedly low.")
-        else:
-            st.info("UK100 4H candle stats skipped (required UK100 daily/4H file unavailable or parse failed).")
-        render_1h_daily_bias_continuation_sweep_edge(parsed, instrument="UK100", show_debug=True)
-        render_sweep_sections(parsed, "UK100")
+    with us30_tab:
+        render_asset_tab("US30")
 
-        st.markdown("**1H file status (loaded + validated for future 08:00–10:00 precision analysis)**")
-        if "UK100_1H" in parsed:
-            st.success(f"UK100 1H file loaded and validated ({len(parsed['UK100_1H']):,} cleaned rows).")
-        else:
-            st.info("UK100 1H file validation skipped (file unavailable or parse failed).")
+    with us500_tab:
+        render_asset_tab("US500")
 
 
 if __name__ == "__main__":
