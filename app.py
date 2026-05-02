@@ -1013,8 +1013,10 @@ def main() -> None:
             st.dataframe(precomputed["h4_attack"].query("Asset == @asset").style.format({"Attack %": "{:.2f}%"}), use_container_width=True)
             st.markdown("### 3) 1H Daily-Bias Continuation Sweep Edge")
             labels={"GER40":"GER40 / DAX","UK100":"UK100","US30":"US30","US500":"US500"}
-            cont=precomputed["h1_cont"].query("Asset == @labels[asset]")
-            st.dataframe(cont.style.format({"Success %": lambda v: "N/A" if pd.isna(v) else f"{v:.2f}%"}), use_container_width=True)
+            asset_label = labels.get(asset, asset)
+            h1_cont = precomputed["h1_cont"]
+            h1_cont_asset = h1_cont[h1_cont["Asset"] == asset_label].copy()
+            st.dataframe(h1_cont_asset.style.format({"Success %": lambda v: "N/A" if pd.isna(v) else f"{v:.2f}%"}), use_container_width=True)
             st.markdown("### 4) Generic Sweep / Failed Breakout Stats")
             st.dataframe(precomputed["generic"].query("Asset == @asset").style.format({"Reversal-Colour %": "{:.2f}%", "Failed-Sweep-Holds %": "{:.2f}%"}), use_container_width=True)
             st.markdown("### 5) Core Session Sweep Stats")
