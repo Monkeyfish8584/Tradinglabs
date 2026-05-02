@@ -982,7 +982,12 @@ def main() -> None:
 
     show_debug = st.checkbox("Show debug / validation tables", value=False)
     show_perf = st.checkbox("Show performance timings", value=False)
-    selected_asset = st.selectbox("Asset", ["GER40", "UK100", "US30", "US500"], index=0)
+    selected_asset = st.radio(
+        "Select asset to view",
+        ["GER40", "UK100", "US30", "US500"],
+        index=0,
+        horizontal=True,
+    )
 
     timings: list[tuple[str, float]] = []
     t0 = time.perf_counter()
@@ -1045,8 +1050,18 @@ def main() -> None:
     labels = {"GER40": "GER40 / DAX", "UK100": "UK100", "US30": "US30", "US500": "US500"}
 
     tf = time.perf_counter()
-    daily = precomputed["daily"].query("Asset == @selected_asset").copy() if precomputed.get("daily") is not None else pd.DataFrame()
-    cont = precomputed["h1_cont"].query("Asset == @labels[selected_asset]").copy() if precomputed.get("h1_cont") is not None else pd.DataFrame()
+    daily_df = precomputed.get("daily")
+    if daily_df is not None and not daily_df.empty:
+        daily = daily_df[daily_df["Asset"] == selected_asset].copy()
+    else:
+        daily = pd.DataFrame()
+
+    asset_label = labels.get(selected_asset, selected_asset)
+    h1_cont = precomputed.get("h1_cont")
+    if h1_cont is not None and not h1_cont.empty:
+        cont = h1_cont[h1_cont["Asset"] == asset_label].copy()
+    else:
+        cont = pd.DataFrame()
     timings.append(("filter selected asset", time.perf_counter() - tf))
 
     st.markdown("### Daily Attack Stats")
@@ -1080,7 +1095,7 @@ def main() -> None:
                 st.markdown(f"#### {title}")
                 if isinstance(df, pd.DataFrame):
                     if "Asset" in df.columns:
-                        df = df.query("Asset == @selected_asset")
+                        df = df[df["Asset"] == selected_asset].copy()
                     st.dataframe(df, width="stretch")
                 else:
                     st.info("Not loaded.")
