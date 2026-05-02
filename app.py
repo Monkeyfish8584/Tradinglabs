@@ -212,7 +212,7 @@ def compute_daily_attack_stats(df_daily: pd.DataFrame) -> pd.DataFrame:
 
     return pd.DataFrame([
         {
-            "Scenario": "Previous daily green → next day breaks previous high",
+            "Scenario": "Uses previous daily candle colour. Previous daily green → next day breaks previous high",
             "Total Cases": int(len(green_cases)),
             "Successful Attacks": int(green_success.sum()),
             "Attack %": pct(int(green_success.sum()), int(len(green_cases))),
@@ -220,7 +220,7 @@ def compute_daily_attack_stats(df_daily: pd.DataFrame) -> pd.DataFrame:
             "Close Beyond %": pct(int(green_close_beyond.sum()), int(len(green_cases))),
         },
         {
-            "Scenario": "Previous daily red → next day breaks previous low",
+            "Scenario": "Uses previous daily candle colour. Previous daily red → next day breaks previous low",
             "Total Cases": int(len(red_cases)),
             "Successful Attacks": int(red_success.sum()),
             "Attack %": pct(int(red_success.sum()), int(len(red_cases))),
@@ -304,8 +304,8 @@ def compute_4h_attack_stats(
         rows=[]
         for g in [overlap_label,next_label,either_label]:
             for sc in [
-                "After green prev completed daily candle → attacks prev completed daily high",
-                "After red prev completed daily candle → attacks prev completed daily low",
+                "Uses previous daily candle colour. After green prev completed daily candle → attacks prev completed daily high",
+                "Uses previous daily candle colour. After red prev completed daily candle → attacks prev completed daily low",
             ]:
                 rows.append({"4H Candle Group":g,"Scenario":sc,"Total Cases":0,"Successful Attacks":0,"Attack %":0.0})
         return pd.DataFrame(rows), pd.DataFrame()
@@ -354,16 +354,16 @@ def compute_4h_attack_stats(
         return {"4H Candle Group":label,"Scenario":scenario,"Total Cases":int(len(s)),"Successful Attacks":int(s["attack_success"].sum()),"Attack %":pct(int(s["attack_success"].sum()),int(len(s)))}
 
     rows=[]
-    rows.append(stats_for(selected, overlap_label, "green", "After green prev completed daily candle → attacks prev completed daily high"))
-    rows.append(stats_for(selected, overlap_label, "red", "After red prev completed daily candle → attacks prev completed daily low"))
-    rows.append(stats_for(selected, next_label, "green", "After green prev completed daily candle → attacks prev completed daily high"))
-    rows.append(stats_for(selected, next_label, "red", "After red prev completed daily candle → attacks prev completed daily low"))
+    rows.append(stats_for(selected, overlap_label, "green", "Uses previous daily candle colour. After green prev completed daily candle → attacks prev completed daily high"))
+    rows.append(stats_for(selected, overlap_label, "red", "Uses previous daily candle colour. After red prev completed daily candle → attacks prev completed daily low"))
+    rows.append(stats_for(selected, next_label, "green", "Uses previous daily candle colour. After green prev completed daily candle → attacks prev completed daily high"))
+    rows.append(stats_for(selected, next_label, "red", "Uses previous daily candle colour. After red prev completed daily candle → attacks prev completed daily low"))
 
     ov=selected[selected["4H Candle Group"].eq(overlap_label)].copy()
     nx=selected[selected["4H Candle Group"].eq(next_label)][["source_overlap_idx","attack_success"]].copy().rename(columns={"attack_success":"next_attack_success"})
     paired=ov.merge(nx,on="source_overlap_idx",how="left")
     paired["either_success"]=paired["attack_success"]|paired["next_attack_success"].fillna(False)
-    for color,scenario in [("green","After green prev completed daily candle → attacks prev completed daily high"),("red","After red prev completed daily candle → attacks prev completed daily low")]:
+    for color,scenario in [("green","Uses previous daily candle colour. After green prev completed daily candle → attacks prev completed daily high"),("red","Uses previous daily candle colour. After red prev completed daily candle → attacks prev completed daily low")]:
         s=paired[paired["previous_daily_colour"]==color]
         rows.append({"4H Candle Group":either_label,"Scenario":scenario,"Total Cases":int(len(s)),"Successful Attacks":int(s["either_success"].sum()),"Attack %":pct(int(s["either_success"].sum()),int(len(s)))})
 
@@ -418,15 +418,15 @@ def add_scenario_column(table: pd.DataFrame, timeframe: str, instrument: str | N
     if "Setup" not in out.columns:
         return out
     if timeframe == "1H":
-        high_txt = "Current 1H candle trades above previous 1H high and closes back below it."
-        low_txt = "Current 1H candle trades below previous 1H low and closes back above it."
+        high_txt = "No daily bias used. Current 1H candle trades above previous 1H high and closes back below it."
+        low_txt = "No daily bias used. Current 1H candle trades below previous 1H low and closes back above it."
     else:
-        high_txt = "Current 4H candle trades above previous 4H high and closes back below it."
-        low_txt = "Current 4H candle trades below previous 4H low and closes back above it."
+        high_txt = "No daily bias used. Current 4H candle trades above previous 4H high and closes back below it."
+        low_txt = "No daily bias used. Current 4H candle trades below previous 4H low and closes back above it."
     if instrument in {"GER40", "UK100", "US30", "US500"}:
         label = "GER40 / DAX" if instrument == "GER40" else instrument
-        high_txt = f"{label} core-session candle sweeps the previous candle high and closes back below it."
-        low_txt = f"{label} core-session candle sweeps the previous candle low and closes back above it."
+        high_txt = f"No daily bias used. {label} core-session candle sweeps the previous candle high and closes back below it."
+        low_txt = f"No daily bias used. {label} core-session candle sweeps the previous candle low and closes back above it."
     out.insert(out.columns.get_loc("Setup") + 1, "Scenario", out["Setup"].map({"High sweep": high_txt, "Low sweep": low_txt}).fillna(""))
     return out
 
@@ -471,7 +471,7 @@ def compute_us_session_4h_sweep_edge(df_4h: pd.DataFrame, instrument: str) -> tu
         [{
             "Asset": instrument,
             "Setup": "High sweep / Low sweep",
-            "Scenario": "US500 14:00–18:00 4H candle compared with previous 10:00–14:00 4H candle." if instrument == "US500" else "US30 15:00–19:00 4H candle compared with previous 11:00–15:00 4H candle.",
+            "Scenario": "No daily bias used. US500 14:00–18:00 4H candle is compared with the previous 10:00–14:00 4H candle." if instrument == "US500" else "No daily bias used. US30 15:00–19:00 4H candle is compared with the previous 11:00–15:00 4H candle.",
             "Candle Tested": tested_label,
             "Compared Against": compared_label,
             "Total Cases": total_cases,
@@ -888,7 +888,7 @@ def compute_us_1h_daily_continuation_stats(parsed: dict[str, pd.DataFrame]) -> t
                 success_pct = np.nan if valid_cases == 0 else pct(success_cases, valid_cases)
                 if valid_cases == 0 and total_cases > 0:
                     note = "N/A — no later session candles"
-                scenario = "Previous daily candle green; selected 1H candle sweeps previous 1H low and closes back above it; later session breaks upward through the opposite 1H level." if "green" in setup else "Previous daily candle red; selected 1H candle sweeps previous 1H high and closes back below it; later session breaks downward through the opposite 1H level."
+                scenario = "Uses previous daily candle colour. Previous daily candle was green; selected 1H candle sweeps previous 1H low and closes back above it; later session breaks upward through the opposite 1H level." if "green" in setup else "Uses previous daily candle colour. Previous daily candle was red; selected 1H candle sweeps previous 1H high and closes back below it; later session breaks downward through the opposite 1H level."
                 cont_rows.append({"Asset": asset, "Hour": f"{hour:02d}:00", "Setup": "Bullish" if "green" in setup else "Bearish", "Scenario": scenario, "Total Cases": total_cases,
                                   "Successful Later Opposite-Level Break Cases": success_cases,
                                   "Success %": success_pct, "Note": note})
@@ -1010,7 +1010,7 @@ def compute_uk_open_1h_daily_continuation_stats(parsed: dict[str, pd.DataFrame])
                 success_cases = int(set_rows[succ].eq(True).sum())
                 success_pct = np.nan if valid_cases == 0 else pct(success_cases, valid_cases)
                 note = "N/A — no later morning candles" if valid_cases == 0 and total_cases > 0 else ""
-                scenario = "Previous daily candle green; 08:00 1H candle sweeps previous 1H low and closes back above it; later morning breaks upward through the opposite 1H level." if "green" in setup else "Previous daily candle red; 08:00 1H candle sweeps previous 1H high and closes back below it; later morning breaks downward through the opposite 1H level."
+                scenario = "Uses previous daily candle colour. Previous daily candle was green; 08:00 1H candle sweeps previous 1H low and closes back above it; later morning breaks upward through the opposite 1H level." if "green" in setup else "Uses previous daily candle colour. Previous daily candle was red; 08:00 1H candle sweeps previous 1H high and closes back below it; later morning breaks downward through the opposite 1H level."
                 cont_rows.append({"Asset": "GER40 / DAX" if asset == "GER40" else asset, "Hour": f"{hour:02d}:00", "Scope": "UK open / expanded morning", "Session Window": "08:00–12:00 Europe/London", "Setup": "Bullish" if "green" in setup else "Bearish", "Scenario": scenario, "Total Cases": total_cases,
                                   "Successful Later Opposite-Level Break Cases": success_cases,
                                   "Success %": success_pct, "Note": note})
