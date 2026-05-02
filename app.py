@@ -975,143 +975,206 @@ def render_1h_daily_bias_continuation_sweep_edge(parsed: dict[str, pd.DataFrame]
                 dbg = dbg[dbg["asset"] == instrument]
             st.dataframe(dbg.head(200), use_container_width=True)
 
-def main() -> None:
-    st.set_page_config(page_title="Trading Dashboard Data Hub", layout="wide")
-    st.title("Trading Dashboard: Data Upload Hub")
-    st.caption("Dashboard runs in precomputed mode by default for speed.")
+EDGE_REGISTRY = {
+    "DAX": {
+        "daily_attack": {
+            "green_attack_prev_high_pct": 76.87,
+            "red_attack_prev_low_pct": 58.28,
+            "green_close_beyond_prev_high_pct": 40.14,
+            "red_close_beyond_prev_low_pct": 30.46,
+        },
+        "h1_daily_bias_continuation": {
+            "key_hour": "08:00",
+            "green_low_sweep_fail_success_pct": 71.74,
+            "green_low_sweep_fail_cases": 46,
+            "red_high_sweep_fail_success_pct": 76.00,
+            "red_high_sweep_fail_cases": 50,
+            "session": "UK Open / Morning",
+            "success_window": "later morning by 12:00",
+        },
+        "core_sweep_context": {
+            "high_sweep_holds_failed_pct": 70.43,
+            "low_sweep_holds_failed_pct": 79.79,
+            "session": "08:00–10:00 Europe/London",
+        },
+    },
+    "UK100": {
+        "daily_attack": {
+            "green_attack_prev_high_pct": 70.70,
+            "red_attack_prev_low_pct": 63.47,
+            "green_close_beyond_prev_high_pct": 33.52,
+            "red_close_beyond_prev_low_pct": 30.79,
+        },
+        "h1_daily_bias_continuation": {
+            "key_hour": "08:00",
+            "green_low_sweep_fail_success_pct": 67.90,
+            "green_low_sweep_fail_cases": 81,
+            "red_high_sweep_fail_success_pct": 62.71,
+            "red_high_sweep_fail_cases": 59,
+            "session": "UK Open / Morning",
+            "success_window": "later morning by 12:00",
+        },
+        "core_sweep_context": {
+            "high_sweep_holds_failed_pct": 76.68,
+            "low_sweep_holds_failed_pct": 77.97,
+            "session": "08:00–10:00 Europe/London",
+        },
+    },
+    "US30": {
+        "daily_attack": {
+            "green_attack_prev_high_pct": 67.55,
+            "red_attack_prev_low_pct": 67.12,
+            "green_close_beyond_prev_high_pct": 32.45,
+            "red_close_beyond_prev_low_pct": 28.77,
+        },
+        "h1_daily_bias_continuation": {
+            "key_hour": "15:00",
+            "green_low_sweep_fail_success_pct": None,
+            "green_low_sweep_fail_cases": None,
+            "red_high_sweep_fail_success_pct": None,
+            "red_high_sweep_fail_cases": None,
+            "session": "US Session",
+            "success_window": "later session by 19:00",
+            "note": "US30 raw 15:00 sweep tendency was high, but daily-bias continuation was weaker and should be research-only for now.",
+        },
+        "core_sweep_context": {
+            "high_sweep_holds_failed_pct": 80.00,
+            "low_sweep_holds_failed_pct": 78.12,
+            "session": "14:30–16:30 Europe/London",
+        },
+        "us_session_4h_sweep_edge": {
+            "scenario": "US30 15:00–19:00 4H candle compared with previous 11:00–15:00 4H candle",
+            "breaks_either_side_pct": 91.54,
+            "breaks_prev_high_pct": 49.23,
+            "breaks_prev_low_pct": 54.62,
+            "breaks_both_sides_pct": 12.31,
+            "high_break_fails_pct": 35.94,
+            "low_break_fails_pct": 60.56,
+        },
+    },
+    "US500": {
+        "daily_attack": {
+            "green_attack_prev_high_pct": 73.55,
+            "red_attack_prev_low_pct": 63.05,
+            "green_close_beyond_prev_high_pct": 40.97,
+            "red_close_beyond_prev_low_pct": 28.92,
+        },
+        "h1_daily_bias_continuation": {
+            "key_hour": "14:00",
+            "green_low_sweep_fail_success_pct": 90.20,
+            "green_low_sweep_fail_cases": 102,
+            "red_high_sweep_fail_success_pct": 85.71,
+            "red_high_sweep_fail_cases": 84,
+            "session": "US Session",
+            "success_window": "later session by 18:00",
+        },
+        "core_sweep_context": {
+            "high_sweep_holds_failed_pct": 68.92,
+            "low_sweep_holds_failed_pct": 73.83,
+            "session": "14:30–16:30 Europe/London",
+        },
+        "us_session_4h_sweep_edge": {
+            "scenario": "US500 14:00–18:00 4H candle compared with previous 10:00–14:00 4H candle",
+            "breaks_either_side_pct": 93.22,
+            "breaks_prev_high_pct": 54.24,
+            "breaks_prev_low_pct": 54.24,
+            "breaks_both_sides_pct": 15.25,
+            "high_break_fails_pct": 50.00,
+            "low_break_fails_pct": 53.13,
+        },
+    },
+}
 
-    show_debug = st.checkbox("Show debug / validation tables", value=False)
-    show_perf = st.checkbox("Show performance timings", value=False)
+
+def main() -> None:
+    st.set_page_config(page_title="Trading Dashboard", layout="wide")
+    st.title("Validated Trading Edge Dashboard")
+    st.caption("Hardcoded validated edge view. These stats are from previous CSV analysis and are not recalculated live.")
+
     selected_asset = st.radio(
-        "Select asset to view",
-        ["GER40", "UK100", "US30", "US500"],
-        index=0,
+        "Select asset",
+        ["DAX", "UK100", "US30", "US500"],
         horizontal=True,
     )
 
-    timings: list[tuple[str, float]] = []
-    parsed: dict[str, pd.DataFrame] = {}
-    drop_files: list[Path] = []
-    parse_warnings: list[str] = []
-    parse_failures: list[str] = []
-    t0 = time.perf_counter()
-    precomputed = load_precomputed_tables(show_debug=show_debug)
-    timings.append(("load precomputed files", time.perf_counter() - t0))
+    edge = EDGE_REGISTRY[selected_asset]
 
-    use_precomputed = has_all_precomputed(precomputed) and not ENABLE_LIVE_RECALC
-    if use_precomputed:
-        meta = precomputed.get("meta") or {}
-        ts = meta.get("precomputed_at_utc")
-        if ts:
-            st.caption(f"Precomputed timestamp (UTC): {ts}")
-    elif not ENABLE_LIVE_RECALC:
-        st.error("Precomputed stats not found. Run scripts/precompute_stats.py to generate them.")
-    parse_warnings = parse_warnings if "parse_warnings" in locals() else []
-    for warning_msg in parse_warnings:
-        st.warning(warning_msg)
-    parse_failures = parse_failures if "parse_failures" in locals() else []
-    for failure_msg in parse_failures:
-        st.error(failure_msg)
+    st.markdown("### 1. Daily Attack Edge")
+    daily = edge["daily_attack"]
+    st.dataframe(pd.DataFrame([
+        {
+            "Scenario": "Uses previous daily candle colour. Previous daily green → next day attacks previous daily high.",
+            "Attack %": daily["green_attack_prev_high_pct"],
+            "Close Beyond %": daily["green_close_beyond_prev_high_pct"],
+        },
+        {
+            "Scenario": "Uses previous daily candle colour. Previous daily red → next day attacks previous daily low.",
+            "Attack %": daily["red_attack_prev_low_pct"],
+            "Close Beyond %": daily["red_close_beyond_prev_low_pct"],
+        },
+    ]).style.format({"Attack %": "{:.2f}%", "Close Beyond %": "{:.2f}%"}), use_container_width=True)
 
-    st.markdown("#### Dashboard Tabs")
-    trading_tab, ger40_tab, uk100_tab, us30_tab, us500_tab = st.tabs(["Trading View", "GER40", "UK100", "US30", "US500"])
+    st.markdown("### 2. 1H Daily-Bias Continuation Sweep Edge")
+    h1 = edge["h1_daily_bias_continuation"]
 
-    with trading_tab:
-        if use_precomputed:
-            st.markdown("### Precomputed Mode")
-            st.caption("Live stat recalculation is disabled. Set ENABLE_LIVE_RECALC=true for development-only live recompute.")
-            st.dataframe(precomputed["daily"].style.format({"Attack %": "{:.2f}%", "Close Beyond %": "{:.2f}%"}), use_container_width=True)
-        else:
-            render_trading_view(parsed, drop_files)
-            render_1h_daily_bias_continuation_sweep_edge(parsed, show_debug=True)
+    def _fmt(v):
+        return "Research only — no strong validated edge yet." if v is None else v
 
-    def render_asset_tab(asset: str):
-        st.markdown("### 1) Daily Attack Stats")
-        if use_precomputed:
-            st.dataframe(precomputed["daily"].query("Asset == @asset").style.format({"Attack %": "{:.2f}%", "Close Beyond %": "{:.2f}%"}), use_container_width=True)
-            st.markdown("### 2) 4H Daily-Bias Attack Stats")
-            st.dataframe(precomputed["h4_attack"].query("Asset == @asset").style.format({"Attack %": "{:.2f}%"}), use_container_width=True)
-            st.markdown("### 3) 1H Daily-Bias Continuation Sweep Edge")
-            labels={"GER40":"GER40 / DAX","UK100":"UK100","US30":"US30","US500":"US500"}
-            asset_label = labels.get(asset, asset)
-            h1_cont = precomputed["h1_cont"]
-            h1_cont_asset = h1_cont[h1_cont["Asset"] == asset_label].copy()
-            st.dataframe(h1_cont_asset.style.format({"Success %": lambda v: "N/A" if pd.isna(v) else f"{v:.2f}%"}), use_container_width=True)
-            st.markdown("### 4) Generic Sweep / Failed Breakout Stats")
-            st.dataframe(precomputed["generic"].query("Asset == @asset").style.format({"Reversal-Colour %": "{:.2f}%", "Failed-Sweep-Holds %": "{:.2f}%"}), use_container_width=True)
-            st.markdown("### 5) Core Session Sweep Stats")
-            st.dataframe(precomputed["core"].query("Asset == @asset").style.format({"Reversal-Colour %": "{:.2f}%", "Failed-Sweep-Holds %": "{:.2f}%"}), use_container_width=True)
-            st.markdown("### 6) US Session 4H Sweep Edge")
-            us=precomputed["us4h"].query("Asset == @asset") if asset in ["US30","US500"] else pd.DataFrame()
-            st.dataframe(us.style.format({"Breaks Previous High %": "{:.2f}%", "Breaks Previous Low %": "{:.2f}%", "Breaks Either Side %": "{:.2f}%", "Breaks Both Sides %": "{:.2f}%", "High Break Fails %": "{:.2f}%", "Low Break Fails %": "{:.2f}%"}), use_container_width=True) if not us.empty else st.info("US Session 4H Sweep Edge applies only to US30 and US500.")
-            st.markdown("### 7) Debug / Validation")
-            st.json(precomputed.get("meta") or {})
-        elif ENABLE_LIVE_RECALC:
-            st.info("Live recalculation enabled (ENABLE_LIVE_RECALC=true).")
-            # fallback to existing runtime sections
-            daily_key=f"{asset}_1D"
-            if daily_key in parsed:
-                st.dataframe(compute_daily_attack_stats(parsed[daily_key]).style.format({"Attack %":"{:.2f}%","Close Beyond %":"{:.2f}%"}), use_container_width=True)
+    h1_df = pd.DataFrame([
+        {
+            "Session": h1["session"],
+            "Key Hour": h1["key_hour"],
+            "Scenario": "Uses previous daily candle colour. Previous daily green; key 1H candle sweeps previous 1H low and closes back above it; later session/window breaks upward through the opposite previous 1H high.",
+            "Cases": _fmt(h1["green_low_sweep_fail_cases"]),
+            "Success %": _fmt(h1["green_low_sweep_fail_success_pct"]),
+        },
+        {
+            "Session": h1["session"],
+            "Key Hour": h1["key_hour"],
+            "Scenario": "Uses previous daily candle colour. Previous daily red; key 1H candle sweeps previous 1H high and closes back below it; later session/window breaks downward through the opposite previous 1H low.",
+            "Cases": _fmt(h1["red_high_sweep_fail_cases"]),
+            "Success %": _fmt(h1["red_high_sweep_fail_success_pct"]),
+        },
+    ])
+    st.dataframe(h1_df, use_container_width=True)
+    st.caption(f"Success window: {h1['success_window']}")
+    if h1.get("note"):
+        st.caption(h1["note"])
 
-    labels = {"GER40": "GER40 / DAX", "UK100": "UK100", "US30": "US30", "US500": "US500"}
+    st.markdown("### 3. Core Sweep Context")
+    core = edge["core_sweep_context"]
+    st.dataframe(pd.DataFrame([
+        {
+            "Scenario": "No daily bias used. Core-session high sweep closes back inside; next candle keeps swept high failed.",
+            "Session": core["session"],
+            "Failed-Sweep-Holds %": core["high_sweep_holds_failed_pct"],
+        },
+        {
+            "Scenario": "No daily bias used. Core-session low sweep closes back inside; next candle keeps swept low failed.",
+            "Session": core["session"],
+            "Failed-Sweep-Holds %": core["low_sweep_holds_failed_pct"],
+        },
+    ]).style.format({"Failed-Sweep-Holds %": "{:.2f}%"}), use_container_width=True)
 
-    tf = time.perf_counter()
-    daily_df = precomputed.get("daily")
-    if daily_df is not None and not daily_df.empty:
-        daily = daily_df[daily_df["Asset"] == selected_asset].copy()
-    else:
-        daily = pd.DataFrame()
-
-    asset_label = labels.get(selected_asset, selected_asset)
-    h1_cont = precomputed.get("h1_cont")
-    if h1_cont is not None and not h1_cont.empty:
-        cont = h1_cont[h1_cont["Asset"] == asset_label].copy()
-    else:
-        cont = pd.DataFrame()
-    timings.append(("filter selected asset", time.perf_counter() - tf))
-
-    st.markdown("### Daily Attack Stats")
-    tr = time.perf_counter()
-    st.dataframe(daily, width="stretch") if not daily.empty else st.info("No daily rows for selected asset.")
-    timings.append(("render daily attack stats", time.perf_counter() - tr))
-
-    st.markdown("### 1H Daily-Bias Continuation Sweep Edge")
-    tr = time.perf_counter()
-    if not cont.empty:
-        main_hours = {"GER40 / DAX": "08:00", "UK100": "08:00", "US500": "14:00", "US30": "15:00"}
-        cont_main = cont[(cont["Success %"] >= 60) | (cont.apply(lambda r: r["Hour"] == main_hours.get(r["Asset"], ""), axis=1))].copy()
-        cont_main["Scenario Short"] = cont_main["Scenario"].str.slice(0, 120) + "…"
-        st.dataframe(cont_main[["Asset", "Session", "Hour", "Setup", "Scenario Short", "Total Cases", "Successful Continuation Cases", "Success %"]], width="stretch")
-    else:
-        st.info("No 1H continuation rows for selected asset.")
-    timings.append(("render 1H continuation", time.perf_counter() - tr))
-
-    st.markdown("### High-Probability Summary")
-    tr = time.perf_counter()
-    hp = pd.DataFrame()
-    if not daily.empty and "Attack %" in daily.columns:
-        hp = daily[daily["Attack %"] >= 60][["Scenario", "Total Cases", "Successful Attacks", "Attack %"]].copy()
-    st.dataframe(hp, width="stretch") if not hp.empty else st.info("No high-probability rows at current threshold.")
-    timings.append(("render high-probability summary", time.perf_counter() - tr))
-
-    if show_debug:
-        with st.expander("Debug / Validation Tables", expanded=False):
-            for key, title in [("h4_attack", "4H Daily-Bias Attack Stats"), ("generic", "Generic Sweep Stats"), ("core", "Core Session Sweep Stats"), ("us4h", "US Session 4H Sweep Edge")]:
-                df = precomputed.get(key)
-                st.markdown(f"#### {title}")
-                if isinstance(df, pd.DataFrame):
-                    if "Asset" in df.columns:
-                        df = df[df["Asset"] == selected_asset].copy()
-                    st.dataframe(df, width="stretch")
-                else:
-                    st.info("Not loaded.")
-            st.markdown("#### Metadata")
-            st.json(precomputed.get("meta") or {})
-
-    if show_perf:
-        perf_df = pd.DataFrame(timings, columns=["Section", "Seconds"])
-        st.markdown("### Performance Timings")
-        st.dataframe(perf_df, width="stretch")
+    if selected_asset in {"US30", "US500"}:
+        st.markdown("### 4. US Session 4H Sweep Edge")
+        us4h = edge["us_session_4h_sweep_edge"]
+        st.dataframe(pd.DataFrame([{
+            "Scenario": f"No daily bias used. {us4h['scenario']}",
+            "Breaks either previous 4H high/low %": us4h["breaks_either_side_pct"],
+            "Breaks previous high %": us4h["breaks_prev_high_pct"],
+            "Breaks previous low %": us4h["breaks_prev_low_pct"],
+            "Breaks both sides %": us4h["breaks_both_sides_pct"],
+            "High break fails %": us4h["high_break_fails_pct"],
+            "Low break fails %": us4h["low_break_fails_pct"],
+        }]).style.format({
+            "Breaks either previous 4H high/low %": "{:.2f}%",
+            "Breaks previous high %": "{:.2f}%",
+            "Breaks previous low %": "{:.2f}%",
+            "Breaks both sides %": "{:.2f}%",
+            "High break fails %": "{:.2f}%",
+            "Low break fails %": "{:.2f}%",
+        }), use_container_width=True)
 
 
 if __name__ == "__main__":
