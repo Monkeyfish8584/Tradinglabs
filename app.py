@@ -990,6 +990,10 @@ def main() -> None:
     )
 
     timings: list[tuple[str, float]] = []
+    parsed: dict[str, pd.DataFrame] = {}
+    drop_files: list[Path] = []
+    parse_warnings: list[str] = []
+    parse_failures: list[str] = []
     t0 = time.perf_counter()
     precomputed = load_precomputed_tables(show_debug=show_debug)
     timings.append(("load precomputed files", time.perf_counter() - t0))
@@ -1002,8 +1006,10 @@ def main() -> None:
             st.caption(f"Precomputed timestamp (UTC): {ts}")
     elif not ENABLE_LIVE_RECALC:
         st.error("Precomputed stats not found. Run scripts/precompute_stats.py to generate them.")
+    parse_warnings = parse_warnings if "parse_warnings" in locals() else []
     for warning_msg in parse_warnings:
         st.warning(warning_msg)
+    parse_failures = parse_failures if "parse_failures" in locals() else []
     for failure_msg in parse_failures:
         st.error(failure_msg)
 
