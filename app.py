@@ -992,6 +992,20 @@ EDGE_REGISTRY = {
             "session": "UK Open / Morning",
             "success_window": "later morning by 12:00",
         },
+        "h4_edge_context": {
+            "daily_bias_attack": {
+                "green_overlap_or_next_attacks_prev_high_pct": 69.23,
+                "red_overlap_or_next_attacks_prev_low_pct": 53.57,
+                "session": "UK open / morning 4H structure",
+                "note": "DAX 4H daily-bias attack stats were strongest after green previous daily candles.",
+            },
+            "failed_sweep_hold": {
+                "high_sweep_holds_failed_pct": 75.00,
+                "low_sweep_holds_failed_pct": 63.64,
+                "scope": "Core-session overlap 4H candles",
+                "note": "Treat DAX 4H failed-sweep stats with some caution due to smaller sample.",
+            },
+        },
         "core_sweep_context": {
             "high_sweep_holds_failed_pct": 70.43,
             "low_sweep_holds_failed_pct": 79.79,
@@ -1013,6 +1027,20 @@ EDGE_REGISTRY = {
             "red_high_sweep_fail_cases": 59,
             "session": "UK Open / Morning",
             "success_window": "later morning by 12:00",
+        },
+        "h4_edge_context": {
+            "daily_bias_attack": {
+                "green_overlap_or_next_attacks_prev_high_pct": 61.86,
+                "red_overlap_or_next_attacks_prev_low_pct": 48.97,
+                "session": "UK open / morning 4H structure",
+                "note": "UK100 4H green previous daily candle → previous high attack was the useful side.",
+            },
+            "failed_sweep_hold": {
+                "high_sweep_holds_failed_pct": 73.97,
+                "low_sweep_holds_failed_pct": 78.30,
+                "scope": "Core-session overlap 4H candles",
+                "note": "UK100 4H failed sweeps often remain failed on the next 4H candle.",
+            },
         },
         "core_sweep_context": {
             "high_sweep_holds_failed_pct": 76.68,
@@ -1036,6 +1064,30 @@ EDGE_REGISTRY = {
             "session": "US Session",
             "success_window": "later session by 19:00",
             "note": "US30 raw 15:00 sweep tendency was high, but daily-bias continuation was weaker and should be research-only for now.",
+        },
+        "h4_edge_context": {
+            "daily_bias_attack": {
+                "green_overlap_or_next_attacks_prev_high_pct": 56.76,
+                "red_overlap_or_next_attacks_prev_low_pct": 60.39,
+                "session": "US core-session 4H structure",
+                "note": "US30 4H daily-bias attack stats are moderate, with red previous daily candle → low attack slightly stronger.",
+            },
+            "failed_sweep_hold": {
+                "high_sweep_holds_failed_pct": 78.49,
+                "low_sweep_holds_failed_pct": 83.28,
+                "scope": "Core-session overlap 4H candles",
+                "note": "US30 has the strongest 4H failed-sweep hold behaviour.",
+            },
+            "session_4h_sweep_edge": {
+                "scenario": "US30 15:00–19:00 4H candle compared with previous 11:00–15:00 4H candle",
+                "breaks_either_side_pct": 91.54,
+                "breaks_prev_high_pct": 49.23,
+                "breaks_prev_low_pct": 54.62,
+                "breaks_both_sides_pct": 12.31,
+                "high_break_fails_pct": 35.94,
+                "low_break_fails_pct": 60.56,
+                "note": "Edge is the liquidity sweep, not guaranteed rejection.",
+            },
         },
         "core_sweep_context": {
             "high_sweep_holds_failed_pct": 80.00,
@@ -1067,6 +1119,30 @@ EDGE_REGISTRY = {
             "red_high_sweep_fail_cases": 84,
             "session": "US Session",
             "success_window": "later session by 18:00",
+        },
+        "h4_edge_context": {
+            "daily_bias_attack": {
+                "green_overlap_or_next_attacks_prev_high_pct": 70.92,
+                "red_overlap_or_next_attacks_prev_low_pct": 53.33,
+                "session": "US core-session 4H structure",
+                "note": "US500 4H daily-bias attack is strongest after green previous daily candles.",
+            },
+            "failed_sweep_hold": {
+                "high_sweep_holds_failed_pct": 70.11,
+                "low_sweep_holds_failed_pct": 76.02,
+                "scope": "Core-session overlap 4H candles",
+                "note": "US500 4H low sweeps have stronger failed-hold behaviour than high sweeps.",
+            },
+            "session_4h_sweep_edge": {
+                "scenario": "US500 14:00–18:00 4H candle compared with previous 10:00–14:00 4H candle",
+                "breaks_either_side_pct": 93.22,
+                "breaks_prev_high_pct": 54.24,
+                "breaks_prev_low_pct": 54.24,
+                "breaks_both_sides_pct": 15.25,
+                "high_break_fails_pct": 50.00,
+                "low_break_fails_pct": 53.13,
+                "note": "Edge is the liquidity sweep, not guaranteed rejection.",
+            },
         },
         "core_sweep_context": {
             "high_sweep_holds_failed_pct": 68.92,
@@ -1149,7 +1225,76 @@ def main() -> None:
     else:
         st.info("No validated 1H daily-bias continuation edge for this asset yet. Keep this as research-only.")
 
-    st.markdown("### 3. Core Sweep Context")
+    st.markdown("### 3. 4H Edge Context")
+    h4_ctx = edge["h4_edge_context"]
+    h4_daily = h4_ctx["daily_bias_attack"]
+    h4_daily_rows = [
+        {
+            "Bias Condition": "Previous daily green",
+            "4H Structure": h4_daily["session"],
+            "Target": "Previous daily high",
+            "Attack %": h4_daily["green_overlap_or_next_attacks_prev_high_pct"],
+            "Interpretation": (
+                "Uses previous daily candle colour. Research/context only."
+                if h4_daily["green_overlap_or_next_attacks_prev_high_pct"] < 60
+                else f"Uses previous daily candle colour. {h4_daily['note']}"
+            ),
+        },
+        {
+            "Bias Condition": "Previous daily red",
+            "4H Structure": h4_daily["session"],
+            "Target": "Previous daily low",
+            "Attack %": h4_daily["red_overlap_or_next_attacks_prev_low_pct"],
+            "Interpretation": (
+                "Uses previous daily candle colour. Research/context only."
+                if h4_daily["red_overlap_or_next_attacks_prev_low_pct"] < 60
+                else f"Uses previous daily candle colour. {h4_daily['note']}"
+            ),
+        },
+    ]
+    st.markdown("**4H Daily-Bias Attack Context**")
+    st.dataframe(pd.DataFrame(h4_daily_rows).style.format({"Attack %": "{:.2f}%"}), use_container_width=True, hide_index=True)
+
+    h4_fail = h4_ctx["failed_sweep_hold"]
+    st.markdown("**4H Failed-Sweep Hold Context**")
+    st.dataframe(pd.DataFrame([
+        {
+            "Setup": "4H high sweep closes back below swept high",
+            "Scope": h4_fail["scope"],
+            "Failed-Sweep Holds %": h4_fail["high_sweep_holds_failed_pct"],
+            "Interpretation": "No daily bias used. Next 4H often stays below the swept high after rejection.",
+        },
+        {
+            "Setup": "4H low sweep closes back above swept low",
+            "Scope": h4_fail["scope"],
+            "Failed-Sweep Holds %": h4_fail["low_sweep_holds_failed_pct"],
+            "Interpretation": "No daily bias used. Next 4H often stays above the swept low after rejection.",
+        },
+    ]).style.format({"Failed-Sweep Holds %": "{:.2f}%"}), use_container_width=True, hide_index=True)
+
+    if selected_asset in {"US30", "US500"}:
+        us4h_ctx = h4_ctx["session_4h_sweep_edge"]
+        st.markdown("**US Session 4H Sweep Edge**")
+        st.dataframe(pd.DataFrame([{
+            "Scenario": us4h_ctx["scenario"],
+            "Breaks Either Side %": us4h_ctx["breaks_either_side_pct"],
+            "Breaks Previous High %": us4h_ctx["breaks_prev_high_pct"],
+            "Breaks Previous Low %": us4h_ctx["breaks_prev_low_pct"],
+            "Breaks Both Sides %": us4h_ctx["breaks_both_sides_pct"],
+            "Interpretation": "No daily bias used. The US-session 4H candle usually sweeps previous 4H liquidity. The edge is expecting a sweep, not assuming reversal.",
+        }]).style.format({
+            "Breaks Either Side %": "{:.2f}%",
+            "Breaks Previous High %": "{:.2f}%",
+            "Breaks Previous Low %": "{:.2f}%",
+            "Breaks Both Sides %": "{:.2f}%",
+        }), use_container_width=True, hide_index=True)
+        with st.expander("Detailed US session 4H rejection stats"):
+            st.dataframe(pd.DataFrame([{
+                "High break fails %": us4h_ctx["high_break_fails_pct"],
+                "Low break fails %": us4h_ctx["low_break_fails_pct"],
+            }]).style.format("{:.2f}%"), use_container_width=True, hide_index=True)
+
+    st.markdown("### 4. Core Sweep Context")
     core = edge["core_sweep_context"]
     st.dataframe(pd.DataFrame([
         {
@@ -1167,7 +1312,7 @@ def main() -> None:
     ]).style.format({"Failed-Sweep Holds %": "{:.2f}%"}), use_container_width=True, hide_index=True)
 
     if selected_asset in {"US30", "US500"}:
-        st.markdown("### 4. US Session 4H Sweep Edge")
+        st.markdown("### 5. US Session 4H Sweep Edge")
         us4h = edge["us_session_4h_sweep_edge"]
         session_candle = "15:00–19:00 vs previous 11:00–15:00" if selected_asset == "US30" else "14:00–18:00 vs previous 10:00–14:00"
         st.dataframe(pd.DataFrame([{
