@@ -1087,7 +1087,7 @@ EDGE_REGISTRY = {
 
 
 def main() -> None:
-    st.set_page_config(page_title="Trading Dashboard", layout="wide")
+    st.set_page_config(page_title="Trading Dashboard", layout="centered")
     st.title("Validated Trading Edge Dashboard")
     st.caption("Hardcoded validated edge view. These stats are from previous CSV analysis and are not recalculated live.")
 
@@ -1103,78 +1103,87 @@ def main() -> None:
     daily = edge["daily_attack"]
     st.dataframe(pd.DataFrame([
         {
-            "Scenario": "Uses previous daily candle colour. Previous daily green → next day attacks previous daily high.",
+            "Bias Condition": "Previous daily green",
+            "Likely Liquidity Target": "Previous daily high",
             "Attack %": daily["green_attack_prev_high_pct"],
             "Close Beyond %": daily["green_close_beyond_prev_high_pct"],
+            "Interpretation": "Edge is the level attack, not guaranteed close beyond.",
         },
         {
-            "Scenario": "Uses previous daily candle colour. Previous daily red → next day attacks previous daily low.",
+            "Bias Condition": "Previous daily red",
+            "Likely Liquidity Target": "Previous daily low",
             "Attack %": daily["red_attack_prev_low_pct"],
             "Close Beyond %": daily["red_close_beyond_prev_low_pct"],
+            "Interpretation": "Edge is the level attack, not guaranteed close beyond.",
         },
-    ]).style.format({"Attack %": "{:.2f}%", "Close Beyond %": "{:.2f}%"}), use_container_width=True)
+    ]).style.format({"Attack %": "{:.2f}%", "Close Beyond %": "{:.2f}%"}), use_container_width=True, hide_index=True)
 
     st.markdown("### 2. 1H Daily-Bias Continuation Sweep Edge")
     h1 = edge["h1_daily_bias_continuation"]
-
-    def _fmt(v):
-        return "Research only — no strong validated edge yet." if v is None else v
-
-    h1_df = pd.DataFrame([
-        {
-            "Session": h1["session"],
+    h1_rows: list[dict] = []
+    if h1["green_low_sweep_fail_success_pct"] is not None and h1["green_low_sweep_fail_cases"] is not None:
+        h1_rows.append({
+            "Bias Condition": "Previous daily green",
             "Key Hour": h1["key_hour"],
-            "Scenario": "Uses previous daily candle colour. Previous daily green; key 1H candle sweeps previous 1H low and closes back above it; later session/window breaks upward through the opposite previous 1H high.",
-            "Cases": _fmt(h1["green_low_sweep_fail_cases"]),
-            "Success %": _fmt(h1["green_low_sweep_fail_success_pct"]),
-        },
-        {
-            "Session": h1["session"],
+            "Failed Sweep Setup": f"{h1['key_hour']} 1H sweeps previous 1H low and closes back above it",
+            "Continuation Target": "Later session/window breaks previous 1H high",
+            "Cases": h1["green_low_sweep_fail_cases"],
+            "Success %": h1["green_low_sweep_fail_success_pct"],
+        })
+    if h1["red_high_sweep_fail_success_pct"] is not None and h1["red_high_sweep_fail_cases"] is not None:
+        h1_rows.append({
+            "Bias Condition": "Previous daily red",
             "Key Hour": h1["key_hour"],
-            "Scenario": "Uses previous daily candle colour. Previous daily red; key 1H candle sweeps previous 1H high and closes back below it; later session/window breaks downward through the opposite previous 1H low.",
-            "Cases": _fmt(h1["red_high_sweep_fail_cases"]),
-            "Success %": _fmt(h1["red_high_sweep_fail_success_pct"]),
-        },
-    ])
-    st.dataframe(h1_df, use_container_width=True)
-    st.caption(f"Success window: {h1['success_window']}")
-    if h1.get("note"):
-        st.caption(h1["note"])
+            "Failed Sweep Setup": f"{h1['key_hour']} 1H sweeps previous 1H high and closes back below it",
+            "Continuation Target": "Later session/window breaks previous 1H low",
+            "Cases": h1["red_high_sweep_fail_cases"],
+            "Success %": h1["red_high_sweep_fail_success_pct"],
+        })
+
+    if h1_rows:
+        st.dataframe(
+            pd.DataFrame(h1_rows).style.format({"Success %": "{:.2f}%"}),
+            use_container_width=True,
+            hide_index=True,
+        )
+    else:
+        st.info("No validated 1H daily-bias continuation edge for this asset yet. Keep this as research-only.")
 
     st.markdown("### 3. Core Sweep Context")
     core = edge["core_sweep_context"]
     st.dataframe(pd.DataFrame([
         {
-            "Scenario": "No daily bias used. Core-session high sweep closes back inside; next candle keeps swept high failed.",
+            "Setup": "High sweep fails",
             "Session": core["session"],
-            "Failed-Sweep-Holds %": core["high_sweep_holds_failed_pct"],
+            "Failed-Sweep Holds %": core["high_sweep_holds_failed_pct"],
+            "Interpretation": "No daily bias. Core-session high sweep closes back inside; next candle keeps swept high failed.",
         },
         {
-            "Scenario": "No daily bias used. Core-session low sweep closes back inside; next candle keeps swept low failed.",
+            "Setup": "Low sweep fails",
             "Session": core["session"],
-            "Failed-Sweep-Holds %": core["low_sweep_holds_failed_pct"],
+            "Failed-Sweep Holds %": core["low_sweep_holds_failed_pct"],
+            "Interpretation": "No daily bias. Core-session low sweep closes back inside; next candle keeps swept low failed.",
         },
-    ]).style.format({"Failed-Sweep-Holds %": "{:.2f}%"}), use_container_width=True)
+    ]).style.format({"Failed-Sweep Holds %": "{:.2f}%"}), use_container_width=True, hide_index=True)
 
     if selected_asset in {"US30", "US500"}:
         st.markdown("### 4. US Session 4H Sweep Edge")
         us4h = edge["us_session_4h_sweep_edge"]
+        session_candle = "15:00–19:00 vs previous 11:00–15:00" if selected_asset == "US30" else "14:00–18:00 vs previous 10:00–14:00"
         st.dataframe(pd.DataFrame([{
-            "Scenario": f"No daily bias used. {us4h['scenario']}",
-            "Breaks either previous 4H high/low %": us4h["breaks_either_side_pct"],
-            "Breaks previous high %": us4h["breaks_prev_high_pct"],
-            "Breaks previous low %": us4h["breaks_prev_low_pct"],
-            "Breaks both sides %": us4h["breaks_both_sides_pct"],
-            "High break fails %": us4h["high_break_fails_pct"],
-            "Low break fails %": us4h["low_break_fails_pct"],
-        }]).style.format({
-            "Breaks either previous 4H high/low %": "{:.2f}%",
-            "Breaks previous high %": "{:.2f}%",
-            "Breaks previous low %": "{:.2f}%",
-            "Breaks both sides %": "{:.2f}%",
-            "High break fails %": "{:.2f}%",
-            "Low break fails %": "{:.2f}%",
-        }), use_container_width=True)
+            "Session 4H Candle": session_candle,
+            "Main Stat": "Breaks previous 4H high or low",
+            "Breaks Either Side %": us4h["breaks_either_side_pct"],
+            "Interpretation": "Edge is expecting a liquidity sweep, not guaranteed reversal.",
+        }]).style.format({"Breaks Either Side %": "{:.2f}%"}), use_container_width=True, hide_index=True)
+        with st.expander("Detailed US 4H sweep stats"):
+            st.dataframe(pd.DataFrame([{
+                "Breaks previous high %": us4h["breaks_prev_high_pct"],
+                "Breaks previous low %": us4h["breaks_prev_low_pct"],
+                "Breaks both sides %": us4h["breaks_both_sides_pct"],
+                "High break fails %": us4h["high_break_fails_pct"],
+                "Low break fails %": us4h["low_break_fails_pct"],
+            }]).style.format("{:.2f}%"), use_container_width=True, hide_index=True)
 
 
 if __name__ == "__main__":
