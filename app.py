@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -19,28 +20,47 @@ TIMEFRAME_TO_SUFFIX = {"1D": "1D", "4H": "4H", "1H": "1H"}
 
 
 @st.cache_data
+def load_precomputed_csv(path: str) -> pd.DataFrame | None:
+    fp = Path(path)
+    if not fp.exists():
+        return None
+    return pd.read_csv(fp)
 
 
-def load_precomputed_tables() -> dict[str, pd.DataFrame | dict | None]:
-    files = {
+@st.cache_data
+def load_precomputed_metadata(path: str) -> dict | None:
+    fp = Path(path)
+    if not fp.exists():
+        return None
+    return json.loads(fp.read_text(encoding="utf-8"))
+
+
+def load_precomputed_tables(show_debug: bool = False) -> dict[str, pd.DataFrame | dict | None]:
+    summary_files = {
         "daily": "daily_attack_stats.csv",
+        "h1_cont": "h1_daily_bias_continuation_sweep_edge.csv",
+    }
+    debug_files = {
         "h4_attack": "h4_daily_bias_attack_stats.csv",
         "generic": "generic_sweep_stats.csv",
         "core": "core_session_sweep_stats.csv",
         "us4h": "us_session_4h_sweep_edge.csv",
-        "h1_cont": "h1_daily_bias_continuation_sweep_edge.csv",
     }
     out: dict[str, pd.DataFrame | dict | None] = {}
-    for k, name in files.items():
-        fp = PRECOMPUTED_DIR / name
-        out[k] = pd.read_csv(fp) if fp.exists() else None
-    meta = PRECOMPUTED_DIR / "precompute_metadata.json"
-    out["meta"] = json.loads(meta.read_text(encoding="utf-8")) if meta.exists() else None
+    for k, name in summary_files.items():
+        out[k] = load_precomputed_csv(str(PRECOMPUTED_DIR / name))
+    if show_debug:
+        for k, name in debug_files.items():
+            out[k] = load_precomputed_csv(str(PRECOMPUTED_DIR / name))
+    else:
+        for k in debug_files:
+            out[k] = None
+    out["meta"] = load_precomputed_metadata(str(PRECOMPUTED_DIR / "precompute_metadata.json"))
     return out
 
 
 def has_all_precomputed(tables: dict[str, pd.DataFrame | dict | None]) -> bool:
-    return all(tables.get(k) is not None for k in ["daily","h4_attack","generic","core","us4h","h1_cont"])
+    return all(tables.get(k) is not None for k in ["daily", "h1_cont"])
 def load_dataframe(path: str) -> pd.DataFrame:
     file_path = Path(path)
     if file_path.suffix.lower() == ".csv":
@@ -958,90 +978,76 @@ def render_1h_daily_bias_continuation_sweep_edge(parsed: dict[str, pd.DataFrame]
 def main() -> None:
     st.set_page_config(page_title="Trading Dashboard Data Hub", layout="wide")
     st.title("Trading Dashboard: Data Upload Hub")
-    st.caption("Upload your trading files now so we can use them to power the dashboard.")
+    st.caption("Dashboard runs in precomputed mode by default for speed.")
 
-    st.subheader("1) GitHub dropzone files")
-    with st.expander("GitHub dropzone files (click to expand)", expanded=False):
-        st.caption("Committed files in github_data/dropzone are auto-loaded into the catalog.")
-        imported, skipped = ensure_dropzone_catalog_synced()
-        drop_files = list_github_dropzone_files()
-        if drop_files:
-            dropzone_table = pd.DataFrame([file_profile(f) for f in drop_files])
-            st.dataframe(
-                dropzone_table[["file_name", "instrument", "timeframe", "rows", "date_range"]],
-                use_container_width=True,
-            )
-            if imported:
-                st.success(f"Auto-sync complete: imported {imported}, skipped {skipped} existing file(s).")
-        else:
-            st.info("No files found in github_data/dropzone yet.")
+    show_debug = st.checkbox("Show debug / validation tables", value=False)
+    show_perf = st.checkbox("Show performance timings", value=False)
+    selected_asset = st.selectbox("Asset", ["GER40", "UK100", "US30", "US500"], index=0)
 
-    st.subheader("2) Previous Day High/Low Attack")
-    parsed, parse_warnings, parse_failures = parse_dropzone_market_files(drop_files)
-    precomputed = load_precomputed_tables()
+    timings: list[tuple[str, float]] = []
+    t0 = time.perf_counter()
+    precomputed = load_precomputed_tables(show_debug=show_debug)
+    timings.append(("load precomputed files", time.perf_counter() - t0))
+
     use_precomputed = has_all_precomputed(precomputed) and not ENABLE_LIVE_RECALC
     if use_precomputed:
-        st.caption("Stats loaded from precomputed files. Re-run scripts/precompute_stats.py after updating CSV data.")
         meta = precomputed.get("meta") or {}
         ts = meta.get("precomputed_at_utc")
         if ts:
-            st.info(f"Precomputed timestamp (UTC): {ts}")
+            st.caption(f"Precomputed timestamp (UTC): {ts}")
     elif not ENABLE_LIVE_RECALC:
-        st.error("Precomputed stats not found. Run scripts/precompute_stats.py to generate them.")
-    for warning_msg in parse_warnings:
-        st.warning(warning_msg)
-    for failure_msg in parse_failures:
-        st.error(failure_msg)
+        st.error("Required precomputed summary files not found. Run scripts/precompute_stats.py.")
+        return
 
-    st.markdown("#### Dashboard Tabs")
-    trading_tab, ger40_tab, uk100_tab, us30_tab, us500_tab = st.tabs(["Trading View", "GER40", "UK100", "US30", "US500"])
+    labels = {"GER40": "GER40 / DAX", "UK100": "UK100", "US30": "US30", "US500": "US500"}
 
-    with trading_tab:
-        if use_precomputed:
-            st.markdown("### Precomputed Mode")
-            st.caption("Live stat recalculation is disabled. Set ENABLE_LIVE_RECALC=true for development-only live recompute.")
-            st.dataframe(precomputed["daily"].style.format({"Attack %": "{:.2f}%", "Close Beyond %": "{:.2f}%"}), use_container_width=True)
-        else:
-            render_trading_view(parsed, drop_files)
-            render_1h_daily_bias_continuation_sweep_edge(parsed, show_debug=True)
+    tf = time.perf_counter()
+    daily = precomputed["daily"].query("Asset == @selected_asset").copy() if precomputed.get("daily") is not None else pd.DataFrame()
+    cont = precomputed["h1_cont"].query("Asset == @labels[selected_asset]").copy() if precomputed.get("h1_cont") is not None else pd.DataFrame()
+    timings.append(("filter selected asset", time.perf_counter() - tf))
 
-    def render_asset_tab(asset: str):
-        st.markdown("### 1) Daily Attack Stats")
-        if use_precomputed:
-            st.dataframe(precomputed["daily"].query("Asset == @asset").style.format({"Attack %": "{:.2f}%", "Close Beyond %": "{:.2f}%"}), use_container_width=True)
-            st.markdown("### 2) 4H Daily-Bias Attack Stats")
-            st.dataframe(precomputed["h4_attack"].query("Asset == @asset").style.format({"Attack %": "{:.2f}%"}), use_container_width=True)
-            st.markdown("### 3) 1H Daily-Bias Continuation Sweep Edge")
-            labels={"GER40":"GER40 / DAX","UK100":"UK100","US30":"US30","US500":"US500"}
-            cont=precomputed["h1_cont"].query("Asset == @labels[asset]")
-            st.dataframe(cont.style.format({"Success %": lambda v: "N/A" if pd.isna(v) else f"{v:.2f}%"}), use_container_width=True)
-            st.markdown("### 4) Generic Sweep / Failed Breakout Stats")
-            st.dataframe(precomputed["generic"].query("Asset == @asset").style.format({"Reversal-Colour %": "{:.2f}%", "Failed-Sweep-Holds %": "{:.2f}%"}), use_container_width=True)
-            st.markdown("### 5) Core Session Sweep Stats")
-            st.dataframe(precomputed["core"].query("Asset == @asset").style.format({"Reversal-Colour %": "{:.2f}%", "Failed-Sweep-Holds %": "{:.2f}%"}), use_container_width=True)
-            st.markdown("### 6) US Session 4H Sweep Edge")
-            us=precomputed["us4h"].query("Asset == @asset") if asset in ["US30","US500"] else pd.DataFrame()
-            st.dataframe(us.style.format({"Breaks Previous High %": "{:.2f}%", "Breaks Previous Low %": "{:.2f}%", "Breaks Either Side %": "{:.2f}%", "Breaks Both Sides %": "{:.2f}%", "High Break Fails %": "{:.2f}%", "Low Break Fails %": "{:.2f}%"}), use_container_width=True) if not us.empty else st.info("US Session 4H Sweep Edge applies only to US30 and US500.")
-            st.markdown("### 7) Debug / Validation")
+    st.markdown("### Daily Attack Stats")
+    tr = time.perf_counter()
+    st.dataframe(daily, width="stretch") if not daily.empty else st.info("No daily rows for selected asset.")
+    timings.append(("render daily attack stats", time.perf_counter() - tr))
+
+    st.markdown("### 1H Daily-Bias Continuation Sweep Edge")
+    tr = time.perf_counter()
+    if not cont.empty:
+        main_hours = {"GER40 / DAX": "08:00", "UK100": "08:00", "US500": "14:00", "US30": "15:00"}
+        cont_main = cont[(cont["Success %"] >= 60) | (cont.apply(lambda r: r["Hour"] == main_hours.get(r["Asset"], ""), axis=1))].copy()
+        cont_main["Scenario Short"] = cont_main["Scenario"].str.slice(0, 120) + "…"
+        st.dataframe(cont_main[["Asset", "Session", "Hour", "Setup", "Scenario Short", "Total Cases", "Successful Continuation Cases", "Success %"]], width="stretch")
+    else:
+        st.info("No 1H continuation rows for selected asset.")
+    timings.append(("render 1H continuation", time.perf_counter() - tr))
+
+    st.markdown("### High-Probability Summary")
+    tr = time.perf_counter()
+    hp = pd.DataFrame()
+    if not daily.empty and "Attack %" in daily.columns:
+        hp = daily[daily["Attack %"] >= 60][["Scenario", "Total Cases", "Successful Attacks", "Attack %"]].copy()
+    st.dataframe(hp, width="stretch") if not hp.empty else st.info("No high-probability rows at current threshold.")
+    timings.append(("render high-probability summary", time.perf_counter() - tr))
+
+    if show_debug:
+        with st.expander("Debug / Validation Tables", expanded=False):
+            for key, title in [("h4_attack", "4H Daily-Bias Attack Stats"), ("generic", "Generic Sweep Stats"), ("core", "Core Session Sweep Stats"), ("us4h", "US Session 4H Sweep Edge")]:
+                df = precomputed.get(key)
+                st.markdown(f"#### {title}")
+                if isinstance(df, pd.DataFrame):
+                    if "Asset" in df.columns:
+                        df = df.query("Asset == @selected_asset")
+                    st.dataframe(df, width="stretch")
+                else:
+                    st.info("Not loaded.")
+            st.markdown("#### Metadata")
             st.json(precomputed.get("meta") or {})
-        elif ENABLE_LIVE_RECALC:
-            st.info("Live recalculation enabled (ENABLE_LIVE_RECALC=true).")
-            # fallback to existing runtime sections
-            daily_key=f"{asset}_1D"
-            if daily_key in parsed:
-                st.dataframe(compute_daily_attack_stats(parsed[daily_key]).style.format({"Attack %":"{:.2f}%","Close Beyond %":"{:.2f}%"}), use_container_width=True)
 
-    with ger40_tab:
-        render_asset_tab("GER40")
-
-    with uk100_tab:
-        render_asset_tab("UK100")
-
-    with us30_tab:
-        render_asset_tab("US30")
-
-    with us500_tab:
-        render_asset_tab("US500")
+    if show_perf:
+        perf_df = pd.DataFrame(timings, columns=["Section", "Seconds"])
+        st.markdown("### Performance Timings")
+        st.dataframe(perf_df, width="stretch")
 
 
 if __name__ == "__main__":
