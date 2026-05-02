@@ -1163,7 +1163,7 @@ EDGE_REGISTRY = {
 
 
 def main() -> None:
-    st.set_page_config(page_title="Trading Dashboard", layout="centered")
+    st.set_page_config(page_title="Trading Dashboard", layout="wide")
     st.title("Validated Trading Edge Dashboard")
     st.caption("Hardcoded validated edge view. These stats are from previous CSV analysis and are not recalculated live.")
 
@@ -1194,38 +1194,7 @@ def main() -> None:
         },
     ]).style.format({"Attack %": "{:.2f}%", "Close Beyond %": "{:.2f}%"}), use_container_width=True, hide_index=True)
 
-    st.markdown("### 2. 1H Daily-Bias Continuation Sweep Edge")
-    h1 = edge["h1_daily_bias_continuation"]
-    h1_rows: list[dict] = []
-    if h1["green_low_sweep_fail_success_pct"] is not None and h1["green_low_sweep_fail_cases"] is not None:
-        h1_rows.append({
-            "Bias Condition": "Previous daily green",
-            "Key Hour": h1["key_hour"],
-            "Failed Sweep Setup": f"{h1['key_hour']} 1H sweeps previous 1H low and closes back above it",
-            "Continuation Target": "Later session/window breaks previous 1H high",
-            "Cases": h1["green_low_sweep_fail_cases"],
-            "Success %": h1["green_low_sweep_fail_success_pct"],
-        })
-    if h1["red_high_sweep_fail_success_pct"] is not None and h1["red_high_sweep_fail_cases"] is not None:
-        h1_rows.append({
-            "Bias Condition": "Previous daily red",
-            "Key Hour": h1["key_hour"],
-            "Failed Sweep Setup": f"{h1['key_hour']} 1H sweeps previous 1H high and closes back below it",
-            "Continuation Target": "Later session/window breaks previous 1H low",
-            "Cases": h1["red_high_sweep_fail_cases"],
-            "Success %": h1["red_high_sweep_fail_success_pct"],
-        })
-
-    if h1_rows:
-        st.dataframe(
-            pd.DataFrame(h1_rows).style.format({"Success %": "{:.2f}%"}),
-            use_container_width=True,
-            hide_index=True,
-        )
-    else:
-        st.info("No validated 1H daily-bias continuation edge for this asset yet. Keep this as research-only.")
-
-    st.markdown("### 3. 4H Edge Context")
+    st.markdown("### 2. 4H Edge Context")
     h4_ctx = edge["h4_edge_context"]
     h4_daily = h4_ctx["daily_bias_attack"]
     h4_daily_rows = [
@@ -1293,6 +1262,37 @@ def main() -> None:
                 "High break fails %": us4h_ctx["high_break_fails_pct"],
                 "Low break fails %": us4h_ctx["low_break_fails_pct"],
             }]).style.format("{:.2f}%"), use_container_width=True, hide_index=True)
+
+    st.markdown("### 3. 1H Daily-Bias Continuation Sweep Edge")
+    h1 = edge["h1_daily_bias_continuation"]
+    h1_rows: list[dict] = []
+    if h1["green_low_sweep_fail_success_pct"] is not None and h1["green_low_sweep_fail_cases"] is not None:
+        h1_rows.append({
+            "Bias Condition": "Previous daily green",
+            "Key Hour": h1["key_hour"],
+            "Failed Sweep Setup": f"{h1['key_hour']} 1H sweeps previous 1H low and closes back above it",
+            "Continuation Target": "Later session/window breaks previous 1H high",
+            "Cases": h1["green_low_sweep_fail_cases"],
+            "Success %": h1["green_low_sweep_fail_success_pct"],
+        })
+    if h1["red_high_sweep_fail_success_pct"] is not None and h1["red_high_sweep_fail_cases"] is not None:
+        h1_rows.append({
+            "Bias Condition": "Previous daily red",
+            "Key Hour": h1["key_hour"],
+            "Failed Sweep Setup": f"{h1['key_hour']} 1H sweeps previous 1H high and closes back below it",
+            "Continuation Target": "Later session/window breaks previous 1H low",
+            "Cases": h1["red_high_sweep_fail_cases"],
+            "Success %": h1["red_high_sweep_fail_success_pct"],
+        })
+
+    if h1_rows:
+        st.dataframe(
+            pd.DataFrame(h1_rows).style.format({"Success %": "{:.2f}%"}),
+            use_container_width=True,
+            hide_index=True,
+        )
+    else:
+        st.info("No validated 1H daily-bias continuation edge for this asset yet. Keep this as research-only.")
 
     st.markdown("### 4. Core Sweep Context")
     core = edge["core_sweep_context"]
