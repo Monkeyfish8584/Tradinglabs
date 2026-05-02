@@ -413,6 +413,24 @@ def compute_sweep_stats(df: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
     return table, metrics
 
 
+def add_scenario_column(table: pd.DataFrame, timeframe: str, instrument: str | None = None) -> pd.DataFrame:
+    out = table.copy()
+    if "Setup" not in out.columns:
+        return out
+    if timeframe == "1H":
+        high_txt = "Current 1H candle trades above previous 1H high and closes back below it."
+        low_txt = "Current 1H candle trades below previous 1H low and closes back above it."
+    else:
+        high_txt = "Current 4H candle trades above previous 4H high and closes back below it."
+        low_txt = "Current 4H candle trades below previous 4H low and closes back above it."
+    if instrument in {"GER40", "UK100", "US30", "US500"}:
+        label = "GER40 / DAX" if instrument == "GER40" else instrument
+        high_txt = f"{label} core-session candle sweeps the previous candle high and closes back below it."
+        low_txt = f"{label} core-session candle sweeps the previous candle low and closes back above it."
+    out.insert(out.columns.get_loc("Setup") + 1, "Scenario", out["Setup"].map({"High sweep": high_txt, "Low sweep": low_txt}).fillna(""))
+    return out
+
+
 def compute_us_session_4h_sweep_edge(df_4h: pd.DataFrame, instrument: str) -> tuple[pd.DataFrame, pd.DataFrame, dict]:
     if instrument not in {"US500", "US30"}:
         return pd.DataFrame(), pd.DataFrame(), {}
@@ -452,6 +470,8 @@ def compute_us_session_4h_sweep_edge(df_4h: pd.DataFrame, instrument: str) -> tu
     result_table = pd.DataFrame(
         [{
             "Asset": instrument,
+            "Setup": "High sweep / Low sweep",
+            "Scenario": "US500 14:00–18:00 4H candle compared with previous 10:00–14:00 4H candle." if instrument == "US500" else "US30 15:00–19:00 4H candle compared with previous 11:00–15:00 4H candle.",
             "Candle Tested": tested_label,
             "Compared Against": compared_label,
             "Total Cases": total_cases,
@@ -525,18 +545,22 @@ def render_sweep_sections(parsed: dict[str, pd.DataFrame], instrument: str) -> N
         st.info("Not enough data loaded to calculate this sweep stat.")
     else:
         h1_table, h1_metrics = compute_sweep_stats(h1_df)
-        st.dataframe(h1_table.style.format({"Reversal-Colour %": "{:.2f}%", "Failed-Sweep-Holds %": "{:.2f}%"}), use_container_width=True)
+        h1_main = add_scenario_column(h1_table, "1H")
+        st.dataframe(h1_main.style.format({"Reversal-Colour %": "{:.2f}%", "Failed-Sweep-Holds %": "{:.2f}%"}), use_container_width=True)
         with st.expander("Full 1H sweep stats"):
-            st.dataframe(h1_table.style.format({"Reversal-Colour %": "{:.2f}%", "Failed-Sweep-Holds %": "{:.2f}%"}), use_container_width=True)
+            st.dataframe(h1_main.style.format({"Reversal-Colour %": "{:.2f}%", "Failed-Sweep-Holds %": "{:.2f}%"}), use_container_width=True)
+        st.caption("These stats are conditional on the scenario shown. Failed-sweep-holds % means the next candle did not reclaim the swept level. Daily-colour continuation stats require the previous completed daily candle to be green or red.")
 
     st.markdown("**4H Sweep / Failed Breakout Stats**")
     if h4_df is None:
         st.info("Not enough data loaded to calculate this sweep stat.")
     else:
         h4_table, h4_metrics = compute_sweep_stats(h4_df)
-        st.dataframe(h4_table.style.format({"Reversal-Colour %": "{:.2f}%", "Failed-Sweep-Holds %": "{:.2f}%"}), use_container_width=True)
+        h4_main = add_scenario_column(h4_table, "4H")
+        st.dataframe(h4_main.style.format({"Reversal-Colour %": "{:.2f}%", "Failed-Sweep-Holds %": "{:.2f}%"}), use_container_width=True)
         with st.expander("Full 4H sweep stats"):
-            st.dataframe(h4_table.style.format({"Reversal-Colour %": "{:.2f}%", "Failed-Sweep-Holds %": "{:.2f}%"}), use_container_width=True)
+            st.dataframe(h4_main.style.format({"Reversal-Colour %": "{:.2f}%", "Failed-Sweep-Holds %": "{:.2f}%"}), use_container_width=True)
+        st.caption("These stats are conditional on the scenario shown. Failed-sweep-holds % means the next candle did not reclaim the swept level. Daily-colour continuation stats require the previous completed daily candle to be green or red.")
 
     st.markdown("**Core Session Sweep Stats**")
     core_rows, debug_frames = [], []
@@ -548,7 +572,8 @@ def render_sweep_sections(parsed: dict[str, pd.DataFrame], instrument: str) -> N
         core_df = df[mask].copy()
         table, _metrics = compute_sweep_stats(core_df) if len(core_df) else (pd.DataFrame(), {})
         for _, r in table.iterrows():
-            core_rows.append({"Timeframe": tf, "Setup": r["Setup"], "Total Cases": int(r["Total Cases"]), "Reversal-Colour Cases": int(r["Reversal-Colour Cases"]), "Reversal-Colour %": r["Reversal-Colour %"], "Failed-Sweep-Holds Cases": int(r["Failed-Sweep-Holds Cases"]), "Failed-Sweep-Holds %": r["Failed-Sweep-Holds %"], "Session Used": session_used})
+            scenario = add_scenario_column(pd.DataFrame([r]), tf, instrument).iloc[0]["Scenario"]
+            core_rows.append({"Timeframe": tf, "Setup": r["Setup"], "Scenario": scenario, "Total Cases": int(r["Total Cases"]), "Reversal-Colour Cases": int(r["Reversal-Colour Cases"]), "Reversal-Colour %": r["Reversal-Colour %"], "Failed-Sweep-Holds Cases": int(r["Failed-Sweep-Holds Cases"]), "Failed-Sweep-Holds %": r["Failed-Sweep-Holds %"], "Session Used": session_used})
         dbg = core_df[["time", "open", "high", "low", "close"]].copy()
         dbg["time_london"] = core_df["time"].dt.tz_convert("Europe/London")
         dbg["timeframe"] = tf
@@ -561,12 +586,7 @@ def render_sweep_sections(parsed: dict[str, pd.DataFrame], instrument: str) -> N
 
     st.markdown("**High Probability Sweep Summary**")
     summary = []
-    label_map = {
-        ("1H", "High sweep", "Failed-Sweep-Holds %"): "1H high sweep → next candle stays below swept high",
-        ("1H", "Low sweep", "Failed-Sweep-Holds %"): "1H low sweep → next candle stays above swept low",
-        ("4H", "High sweep", "Failed-Sweep-Holds %"): "4H high sweep → next candle stays below swept high",
-        ("4H", "Low sweep", "Failed-Sweep-Holds %"): "4H low sweep → next candle stays above swept low",
-    }
+    defs = {"Reversal colour": "Next candle colour reverses after the sweep.", "Failed sweep holds": "Next candle closes back inside the swept level."}
     if core_rows:
         all_rows = []
         if h1_df is not None:
@@ -574,17 +594,16 @@ def render_sweep_sections(parsed: dict[str, pd.DataFrame], instrument: str) -> N
         if h4_df is not None:
             all_rows += [{"Timeframe": "4H", **r} for r in compute_sweep_stats(h4_df)[0].to_dict("records")]
         for row in all_rows:
+            scenario = add_scenario_column(pd.DataFrame([{"Setup": row["Setup"]}]), row["Timeframe"]).iloc[0]["Scenario"]
+            asset_label = "GER40 / DAX" if instrument == "GER40" else instrument
             hold_pct = row["Failed-Sweep-Holds %"]
             rev_pct = row["Reversal-Colour %"]
             if hold_pct >= 60:
-                edge = "Strong edge" if hold_pct >= 70 else "Useful edge"
-                txt = label_map[(row["Timeframe"], row["Setup"], "Failed-Sweep-Holds %")]
-                summary.append({"Timeframe": row["Timeframe"], "Signal": txt, "Metric": "Failed-Sweep-Holds %", "Value": hold_pct, "Edge": edge, "Interpretation": "After price sweeps the previous candle high and closes back inside, the next candle often fails to reclaim that swept high." if row["Setup"] == "High sweep" else "After price sweeps the previous candle low and closes back inside, the next candle often holds above that swept low."})
+                summary.append({"Asset": asset_label, "Timeframe": row["Timeframe"], "Scope": "All candles", "Setup": row["Setup"], "Scenario": scenario, "Probability Type": "Failed sweep holds", "Cases": int(row["Total Cases"]), "Probability %": hold_pct, "Definition": defs["Failed sweep holds"]})
             if rev_pct >= 60:
-                edge = "Strong edge" if rev_pct >= 70 else "Useful edge"
-                summary.append({"Timeframe": row["Timeframe"], "Signal": f"{row['Timeframe']} {row['Setup'].lower()} → next candle reversal-colour", "Metric": "Reversal-Colour % (weaker)", "Value": rev_pct, "Edge": edge, "Interpretation": "This measures next-candle colour only, so treat it as weaker than the failed-level hold stat."})
+                summary.append({"Asset": asset_label, "Timeframe": row["Timeframe"], "Scope": "All candles", "Setup": row["Setup"], "Scenario": scenario, "Probability Type": "Reversal colour", "Cases": int(row["Total Cases"]), "Probability %": rev_pct, "Definition": defs["Reversal colour"]})
     if summary:
-        st.dataframe(pd.DataFrame(summary).sort_values(["Timeframe", "Metric"]), use_container_width=True)
+        st.dataframe(pd.DataFrame(summary).sort_values(["Asset", "Timeframe", "Probability Type"]), use_container_width=True)
     else:
         st.info("No high-probability sweep stats (>= 60%) found for this asset.")
 
@@ -879,7 +898,7 @@ def compute_us_1h_daily_continuation_stats(parsed: dict[str, pd.DataFrame]) -> t
             bl = int(subset["breaks_prev_low"].sum())
             be = int(subset["breaks_either"].sum())
             bb = int(subset["breaks_both"].sum())
-            raw_rows.append({"Asset": asset, "Hour": f"{hour:02d}:00", "Total Cases": total,
+            raw_rows.append({"Asset": "GER40 / DAX" if asset == "GER40" else asset, "Hour": f"{hour:02d}:00", "Total Cases": total,
                              "Breaks Previous High Cases": bh, "Breaks Previous High %": pct(bh, total),
                              "Breaks Previous Low Cases": bl, "Breaks Previous Low %": pct(bl, total),
                              "Breaks Either Side Cases": be, "Breaks Either Side %": pct(be, total),
@@ -898,7 +917,8 @@ def compute_us_1h_daily_continuation_stats(parsed: dict[str, pd.DataFrame]) -> t
                 success_pct = np.nan if valid_cases == 0 else pct(success_cases, valid_cases)
                 if valid_cases == 0 and total_cases > 0:
                     note = "N/A — no later session candles"
-                cont_rows.append({"Asset": asset, "Hour": f"{hour:02d}:00", "Setup": setup, "Total Cases": total_cases,
+                scenario = "Previous daily candle green; selected 1H candle sweeps previous 1H low and closes back above it; later session tests upward through the opposite 1H level." if "green" in setup else "Previous daily candle red; selected 1H candle sweeps previous 1H high and closes back below it; later session tests downward through the opposite 1H level."
+                cont_rows.append({"Asset": asset, "Hour": f"{hour:02d}:00", "Setup": "Bullish" if "green" in setup else "Bearish", "Scenario": scenario, "Total Cases": total_cases,
                                   "Successful Later Opposite-Level Break Cases": success_cases,
                                   "Success %": success_pct, "Note": note})
 
@@ -922,7 +942,7 @@ def render_us_1h_daily_continuation_section(parsed: dict[str, pd.DataFrame]) -> 
     us500_14 = cont[(cont["Asset"] == "US500") & (cont["Hour"] == "14:00")]
     for _, r in us500_14.iterrows():
         if pd.notna(r["Success %"]) and float(r["Success %"]) >= 70:
-            kind = "bullish" if "green" in r["Setup"] else "bearish"
+            kind = str(r["Setup"]).lower()
             cards.append(f"Strong {kind} continuation sweep edge: US500 14:00 success {float(r['Success %']):.2f}% (Cases: {int(r['Total Cases'])}).")
     us30_rows = cont[cont["Asset"] == "US30"]
     for _, r in us30_rows.iterrows():
@@ -1039,7 +1059,8 @@ def compute_uk_open_1h_daily_continuation_stats(parsed: dict[str, pd.DataFrame])
                 success_cases = int(set_rows[succ].eq(True).sum())
                 success_pct = np.nan if valid_cases == 0 else pct(success_cases, valid_cases)
                 note = "N/A — no later morning candles" if valid_cases == 0 and total_cases > 0 else ""
-                cont_rows.append({"Asset": asset, "Hour": f"{hour:02d}:00", "Setup": setup, "Total Cases": total_cases,
+                scenario = "Previous daily candle green; 08:00 1H candle sweeps previous 1H low and closes back above it; later morning tests upward through the opposite 1H level." if "green" in setup else "Previous daily candle red; 08:00 1H candle sweeps previous 1H high and closes back below it; later morning tests downward through the opposite 1H level."
+                cont_rows.append({"Asset": "GER40 / DAX" if asset == "GER40" else asset, "Hour": f"{hour:02d}:00", "Scope": "UK open / expanded morning", "Session Window": "08:00–12:00 Europe/London", "Setup": "Bullish" if "green" in setup else "Bearish", "Scenario": scenario, "Total Cases": total_cases,
                                   "Successful Later Opposite-Level Break Cases": success_cases,
                                   "Success %": success_pct, "Note": note})
 
@@ -1060,22 +1081,22 @@ def render_uk_open_1h_daily_continuation_section(parsed: dict[str, pd.DataFrame]
     st.caption("This is more directional than the raw sweep stat. The raw stat says the UK open candle often takes liquidity; this conditional stat checks whether a failed sweep then follows the previous daily direction.")
 
     card_specs = [
-        ("GER40", "DAX", "green", 70, "Strong bullish UK open continuation sweep edge"),
-        ("GER40", "DAX", "red", 70, "Strong bearish UK open continuation sweep edge"),
-        ("UK100", "UK100", "green", 60, "Useful bullish UK open continuation sweep edge"),
-        ("UK100", "UK100", "red", 60, "Useful bearish UK open continuation sweep edge"),
+        ("GER40 / DAX", "DAX", "Bullish", 70, "Strong bullish UK open continuation sweep edge"),
+        ("GER40 / DAX", "DAX", "Bearish", 70, "Strong bearish UK open continuation sweep edge"),
+        ("UK100", "UK100", "Bullish", 60, "Useful bullish UK open continuation sweep edge"),
+        ("UK100", "UK100", "Bearish", 60, "Useful bearish UK open continuation sweep edge"),
     ]
     shown = 0
-    for asset, label, colour, threshold, edge_label in card_specs:
-        row = cont[(cont["Asset"] == asset) & (cont["Hour"] == "08:00") & (cont["Setup"].str.contains(f"Previous daily {colour}"))]
+    for asset, label, setup, threshold, edge_label in card_specs:
+        row = cont[(cont["Asset"] == asset) & (cont["Hour"] == "08:00") & (cont["Setup"] == setup)]
         if row.empty:
             continue
         r = row.iloc[0]
         if pd.notna(r["Success %"]) and float(r["Success %"]) >= threshold:
-            direction = "upward" if colour == "green" else "downward"
-            level_side = "low and closes back above it" if colour == "green" else "high and closes back below it"
+            direction = "upward" if setup == "Bullish" else "downward"
+            level_side = "low and closes back above it" if setup == "Bullish" else "high and closes back below it"
             st.success(
-                f"{edge_label}. {label} 08:00 1H candle after a {colour} daily candle: "
+                f"{edge_label}. {label} 08:00 1H candle: "
                 f"If it sweeps the previous 1H {level_side}, price later broke {direction} through the opposite 1H level by 12:00 "
                 f"{float(r['Success %']):.2f}% of the time. Cases: {int(r['Total Cases'])}."
             )
