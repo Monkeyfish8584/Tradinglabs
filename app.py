@@ -941,6 +941,155 @@ def render_us_1h_daily_continuation_section(parsed: dict[str, pd.DataFrame]) -> 
     with st.expander("US 1H Daily-Continuation Sweep Debug"):
         st.dataframe(debug.head(50), use_container_width=True)
 
+
+def compute_uk_open_1h_daily_continuation_stats(parsed: dict[str, pd.DataFrame]) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    strict_hours = [8, 9]
+    expanded_hours = [8, 9, 10, 11]
+    raw_rows: list[dict] = []
+    cont_rows: list[dict] = []
+    debug_rows: list[pd.DataFrame] = []
+
+    for asset in ["GER40", "UK100"]:
+        h1_key, d1_key = f"{asset}_1H", f"{asset}_1D"
+        if h1_key not in parsed or d1_key not in parsed:
+            continue
+
+        h1 = prepare_ohlc(parsed[h1_key], "1H").copy().sort_values("time_london").reset_index(drop=True)
+        h1["hour"] = h1["time_london"].dt.hour
+        h1["prev_1h_start_london"] = h1["time_london"].shift(1)
+        h1["previous_1h_high"] = h1["high"].shift(1)
+        h1["previous_1h_low"] = h1["low"].shift(1)
+
+        d1 = prepare_ohlc(parsed[d1_key], "1D").copy().sort_values("time_london").reset_index(drop=True)
+        d1["daily_start"] = d1["time_london"]
+        d1["daily_end"] = d1["candle_end"]
+        d1 = d1.dropna(subset=["daily_end"]).copy()
+        d1["previous_daily_colour"] = "neutral"
+        d1.loc[d1["close"] > d1["open"], "previous_daily_colour"] = "green"
+        d1.loc[d1["close"] < d1["open"], "previous_daily_colour"] = "red"
+
+        h1["h1_start_merge"] = h1["time_london"].dt.tz_localize(None).astype("datetime64[ns]")
+        d1["daily_end_merge"] = d1["daily_end"].dt.tz_localize(None).astype("datetime64[ns]")
+
+        merged = pd.merge_asof(
+            h1.sort_values("h1_start_merge"),
+            d1[["daily_start", "daily_end", "daily_end_merge", "previous_daily_colour"]].sort_values("daily_end_merge"),
+            left_on="h1_start_merge",
+            right_on="daily_end_merge",
+            direction="backward",
+        ).sort_values("time_london").reset_index(drop=True)
+
+        tested = merged[merged["hour"].isin(expanded_hours)].copy()
+        tested["breaks_prev_high"] = tested["high"] > tested["previous_1h_high"]
+        tested["breaks_prev_low"] = tested["low"] < tested["previous_1h_low"]
+        tested["breaks_either"] = tested["breaks_prev_high"] | tested["breaks_prev_low"]
+        tested["breaks_both"] = tested["breaks_prev_high"] & tested["breaks_prev_low"]
+
+        tested["bullish_setup_triggered"] = (
+            (tested["previous_daily_colour"] == "green")
+            & (tested["low"] < tested["previous_1h_low"])
+            & (tested["close"] > tested["previous_1h_low"])
+        )
+        tested["bearish_setup_triggered"] = (
+            (tested["previous_daily_colour"] == "red")
+            & (tested["high"] > tested["previous_1h_high"])
+            & (tested["close"] < tested["previous_1h_high"])
+        )
+
+        tested["later_morning_high"] = np.nan
+        tested["later_morning_low"] = np.nan
+        tested["bullish_success"] = pd.NA
+        tested["bearish_success"] = pd.NA
+
+        for idx in tested.index:
+            row = tested.loc[idx]
+            later = tested[(tested["time_london"].dt.date == row["time_london"].date()) & (tested["hour"] > row["hour"])]
+            if later.empty:
+                continue
+            tested.loc[idx, "later_morning_high"] = later["high"].max()
+            tested.loc[idx, "later_morning_low"] = later["low"].min()
+            if row["bullish_setup_triggered"]:
+                tested.loc[idx, "bullish_success"] = bool((later["high"] > row["previous_1h_high"]).any())
+            if row["bearish_setup_triggered"]:
+                tested.loc[idx, "bearish_success"] = bool((later["low"] < row["previous_1h_low"]).any())
+
+        for hour in strict_hours:
+            subset = tested[tested["hour"] == hour]
+            total = int(len(subset))
+            bh = int(subset["breaks_prev_high"].sum())
+            bl = int(subset["breaks_prev_low"].sum())
+            be = int(subset["breaks_either"].sum())
+            bb = int(subset["breaks_both"].sum())
+            raw_rows.append({"Asset": asset, "Hour": f"{hour:02d}:00", "Total Cases": total,
+                             "Breaks Previous High Cases": bh, "Breaks Previous High %": pct(bh, total),
+                             "Breaks Previous Low Cases": bl, "Breaks Previous Low %": pct(bl, total),
+                             "Breaks Either Side Cases": be, "Breaks Either Side %": pct(be, total),
+                             "Breaks Both Sides Cases": bb, "Breaks Both Sides %": pct(bb, total)})
+
+        for hour in expanded_hours:
+            subset = tested[tested["hour"] == hour]
+            for setup, col, succ in [
+                ("Previous daily green + low sweep/fail → later morning breaks upward through opposite 1H level", "bullish_setup_triggered", "bullish_success"),
+                ("Previous daily red + high sweep/fail → later morning breaks downward through opposite 1H level", "bearish_setup_triggered", "bearish_success"),
+            ]:
+                set_rows = subset[subset[col]]
+                total_cases = int(len(set_rows))
+                valid = set_rows[succ].isin([True, False])
+                valid_cases = int(valid.sum())
+                success_cases = int(set_rows[succ].eq(True).sum())
+                success_pct = np.nan if valid_cases == 0 else pct(success_cases, valid_cases)
+                note = "N/A — no later morning candles" if valid_cases == 0 and total_cases > 0 else ""
+                cont_rows.append({"Asset": asset, "Hour": f"{hour:02d}:00", "Setup": setup, "Total Cases": total_cases,
+                                  "Successful Later Opposite-Level Break Cases": success_cases,
+                                  "Success %": success_pct, "Note": note})
+
+        dbg = tested[["time_london", "hour", "prev_1h_start_london", "previous_1h_high", "previous_1h_low", "open", "high", "low", "close", "daily_start", "daily_end", "previous_daily_colour", "bullish_setup_triggered", "bearish_setup_triggered", "later_morning_high", "later_morning_low", "bullish_success", "bearish_success"]].copy()
+        dbg.insert(0, "asset", asset)
+        dbg = dbg.rename(columns={"time_london": "candle_start_london", "open": "current_open", "high": "current_high", "low": "current_low", "close": "current_close", "daily_start": "previous_daily_start", "daily_end": "previous_daily_end"})
+        debug_rows.append(dbg)
+
+    return pd.DataFrame(raw_rows), pd.DataFrame(cont_rows), (pd.concat(debug_rows, ignore_index=True) if debug_rows else pd.DataFrame())
+
+
+def render_uk_open_1h_daily_continuation_section(parsed: dict[str, pd.DataFrame]) -> None:
+    st.markdown("**UK Open 1H Daily-Continuation Sweep Edge**")
+    raw, cont, debug = compute_uk_open_1h_daily_continuation_stats(parsed)
+    if raw.empty:
+        st.info("GER40/UK100 1H + daily files are required for this section.")
+        return
+    st.caption("This is more directional than the raw sweep stat. The raw stat says the UK open candle often takes liquidity; this conditional stat checks whether a failed sweep then follows the previous daily direction.")
+
+    card_specs = [
+        ("GER40", "DAX", "green", 70, "Strong bullish UK open continuation sweep edge"),
+        ("GER40", "DAX", "red", 70, "Strong bearish UK open continuation sweep edge"),
+        ("UK100", "UK100", "green", 60, "Useful bullish UK open continuation sweep edge"),
+        ("UK100", "UK100", "red", 60, "Useful bearish UK open continuation sweep edge"),
+    ]
+    shown = 0
+    for asset, label, colour, threshold, edge_label in card_specs:
+        row = cont[(cont["Asset"] == asset) & (cont["Hour"] == "08:00") & (cont["Setup"].str.contains(f"Previous daily {colour}"))]
+        if row.empty:
+            continue
+        r = row.iloc[0]
+        if pd.notna(r["Success %"]) and float(r["Success %"]) >= threshold:
+            direction = "upward" if colour == "green" else "downward"
+            level_side = "low and closes back above it" if colour == "green" else "high and closes back below it"
+            st.success(
+                f"{edge_label}. {label} 08:00 1H candle after a {colour} daily candle: "
+                f"If it sweeps the previous 1H {level_side}, price later broke {direction} through the opposite 1H level by 12:00 "
+                f"{float(r['Success %']):.2f}% of the time. Cases: {int(r['Total Cases'])}."
+            )
+            shown += 1
+    if shown == 0:
+        st.info("No high-probability continuation cards met the current thresholds.")
+
+    st.markdown("UK Open Raw 1H Sweep Tendency by Hour")
+    st.dataframe(raw.sort_values(["Asset", "Hour"]).style.format({c: "{:.2f}%" for c in raw.columns if c.endswith('%')}), use_container_width=True)
+    st.markdown("UK Open Daily-Colour 1H Sweep Continuation by Hour")
+    st.dataframe(cont.sort_values(["Asset", "Setup", "Hour"]).style.format({"Success %": lambda v: "N/A" if pd.isna(v) else f"{v:.2f}%"}), use_container_width=True)
+    with st.expander("UK Open 1H Daily-Continuation Sweep Debug"):
+        st.dataframe(debug.head(50), use_container_width=True)
+
 def main() -> None:
     st.set_page_config(page_title="Trading Dashboard Data Hub", layout="wide")
     st.title("Trading Dashboard: Data Upload Hub")
@@ -1125,6 +1274,7 @@ def main() -> None:
         else:
             st.info("UK100 4H candle stats skipped (required UK100 daily/4H file unavailable or parse failed).")
         render_sweep_sections(parsed, "UK100")
+        render_uk_open_1h_daily_continuation_section(parsed)
 
         st.markdown("**1H file status (loaded + validated for future 08:00–10:00 precision analysis)**")
         if "UK100_1H" in parsed:
