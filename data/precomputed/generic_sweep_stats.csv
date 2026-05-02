@@ -1,0 +1,17 @@
+Asset,Timeframe,Setup,Scenario,Total Cases,Reversal-Colour Cases,Reversal-Colour %,Failed-Sweep-Holds Cases,Failed-Sweep-Holds %
+GER40,1H,High sweep,No daily bias used. Current 1H candle trades above previous 1H high and closes back below it.,2075,953,45.92771084337349,1480,71.32530120481928
+GER40,1H,Low sweep,No daily bias used. Current 1H candle trades below previous 1H low and closes back above it.,2058,1053,51.16618075801749,1557,75.65597667638484
+GER40,4H,High sweep,No daily bias used. Current 4H candle trades above previous 4H high and closes back below it.,75,34,45.33333333333333,51,68.0
+GER40,4H,Low sweep,No daily bias used. Current 4H candle trades below previous 4H low and closes back above it.,70,36,51.42857142857142,59,84.28571428571429
+UK100,1H,High sweep,No daily bias used. Current 1H candle trades above previous 1H high and closes back below it.,2845,1373,48.260105448154654,2037,71.59929701230229
+UK100,1H,Low sweep,No daily bias used. Current 1H candle trades below previous 1H low and closes back above it.,2780,1406,50.57553956834533,2041,73.41726618705036
+UK100,4H,High sweep,No daily bias used. Current 4H candle trades above previous 4H high and closes back below it.,3389,1573,46.41487164355267,2409,71.08291531425199
+UK100,4H,Low sweep,No daily bias used. Current 4H candle trades below previous 4H low and closes back above it.,3222,1667,51.73805090006207,2384,73.99130974549969
+US30,1H,High sweep,No daily bias used. Current 1H candle trades above previous 1H high and closes back below it.,1165,533,45.75107296137339,824,70.72961373390558
+US30,1H,Low sweep,No daily bias used. Current 1H candle trades below previous 1H low and closes back above it.,1137,598,52.594547053649954,849,74.67018469656992
+US30,4H,High sweep,No daily bias used. Current 4H candle trades above previous 4H high and closes back below it.,1099,541,49.22656960873522,783,71.24658780709736
+US30,4H,Low sweep,No daily bias used. Current 4H candle trades below previous 4H low and closes back above it.,1064,564,53.00751879699248,779,73.21428571428571
+US500,1H,High sweep,No daily bias used. Current 1H candle trades above previous 1H high and closes back below it.,3003,1379,45.92074592074592,2057,68.4981684981685
+US500,1H,Low sweep,No daily bias used. Current 1H candle trades below previous 1H low and closes back above it.,2886,1490,51.628551628551634,2130,73.8045738045738
+US500,4H,High sweep,No daily bias used. Current 4H candle trades above previous 4H high and closes back below it.,959,478,49.84358706986444,663,69.13451511991659
+US500,4H,Low sweep,No daily bias used. Current 4H candle trades below previous 4H low and closes back above it.,899,505,56.17352614015573,681,75.75083426028921

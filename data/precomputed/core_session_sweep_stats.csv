@@ -1,0 +1,17 @@
+Asset,Timeframe,Session,Setup,Scenario,Total Cases,Reversal-Colour Cases,Reversal-Colour %,Failed-Sweep-Holds Cases,Failed-Sweep-Holds %
+GER40,1H,08:00–10:00 Europe/London,High sweep,No daily bias used. GER40 / DAX core-session candle sweeps the previous candle high and closes back below it.,106,45,42.45283018867924,50,47.16981132075472
+GER40,1H,08:00–10:00 Europe/London,Low sweep,No daily bias used. GER40 / DAX core-session candle sweeps the previous candle low and closes back above it.,110,63,57.27272727272727,77,70.0
+GER40,4H,08:00–10:00 Europe/London,High sweep,No daily bias used. GER40 / DAX core-session candle sweeps the previous candle high and closes back below it.,24,12,50.0,11,45.83333333333333
+GER40,4H,08:00–10:00 Europe/London,Low sweep,No daily bias used. GER40 / DAX core-session candle sweeps the previous candle low and closes back above it.,18,10,55.55555555555556,11,61.111111111111114
+UK100,1H,08:00–10:00 Europe/London,High sweep,No daily bias used. UK100 core-session candle sweeps the previous candle high and closes back below it.,138,54,39.130434782608695,86,62.31884057971014
+UK100,1H,08:00–10:00 Europe/London,Low sweep,No daily bias used. UK100 core-session candle sweeps the previous candle low and closes back above it.,146,79,54.109589041095894,97,66.43835616438356
+UK100,4H,08:00–10:00 Europe/London,High sweep,No daily bias used. UK100 core-session candle sweeps the previous candle high and closes back below it.,395,195,49.36708860759494,227,57.46835443037974
+UK100,4H,08:00–10:00 Europe/London,Low sweep,No daily bias used. UK100 core-session candle sweeps the previous candle low and closes back above it.,399,211,52.88220551378446,280,70.17543859649122
+US30,1H,14:30–16:30 Europe/London,High sweep,No daily bias used. US30 core-session candle sweeps the previous candle high and closes back below it.,112,55,49.107142857142854,79,70.53571428571429
+US30,1H,14:30–16:30 Europe/London,Low sweep,No daily bias used. US30 core-session candle sweeps the previous candle low and closes back above it.,116,63,54.310344827586206,79,68.10344827586206
+US30,4H,14:30–16:30 Europe/London,High sweep,No daily bias used. US30 core-session candle sweeps the previous candle high and closes back below it.,161,79,49.06832298136646,117,72.67080745341616
+US30,4H,14:30–16:30 Europe/London,Low sweep,No daily bias used. US30 core-session candle sweeps the previous candle low and closes back above it.,174,87,50.0,125,71.83908045977012
+US500,1H,14:30–16:30 Europe/London,High sweep,No daily bias used. US500 core-session candle sweeps the previous candle high and closes back below it.,302,141,46.688741721854306,187,61.920529801324506
+US500,1H,14:30–16:30 Europe/London,Low sweep,No daily bias used. US500 core-session candle sweeps the previous candle low and closes back above it.,307,165,53.74592833876222,221,71.9869706840391
+US500,4H,14:30–16:30 Europe/London,High sweep,No daily bias used. US500 core-session candle sweeps the previous candle high and closes back below it.,253,113,44.66403162055336,156,61.6600790513834
+US500,4H,14:30–16:30 Europe/London,Low sweep,No daily bias used. US500 core-session candle sweeps the previous candle low and closes back above it.,253,145,57.31225296442688,187,73.91304347826086
