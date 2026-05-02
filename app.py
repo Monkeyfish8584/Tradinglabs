@@ -540,29 +540,32 @@ def render_sweep_sections(parsed: dict[str, pd.DataFrame], instrument: str) -> N
     h1_df, h4_df = parsed.get(h1_key), parsed.get(h4_key)
     session_used = "08:00–10:00 Europe/London" if instrument in {"GER40", "UK100"} else "14:30–16:30 Europe/London"
 
-    st.markdown("**1H Sweep / Failed Breakout Stats**")
+    st.markdown("### 3) Generic Sweep / Failed Breakout Stats")
+    st.markdown("**1H Generic Sweep / Failed Breakout Stats — All Candles**")
     if h1_df is None:
         st.info("Not enough data loaded to calculate this sweep stat.")
     else:
         h1_table, h1_metrics = compute_sweep_stats(h1_df)
-        h1_main = add_scenario_column(h1_table, "1H")
+        h1_main = add_scenario_column(h1_table, "1H")[["Setup", "Scenario", "Total Cases", "Reversal-Colour %", "Failed-Sweep-Holds %"]]
         st.dataframe(h1_main.style.format({"Reversal-Colour %": "{:.2f}%", "Failed-Sweep-Holds %": "{:.2f}%"}), use_container_width=True)
-        with st.expander("Full 1H sweep stats"):
-            st.dataframe(h1_main.style.format({"Reversal-Colour %": "{:.2f}%", "Failed-Sweep-Holds %": "{:.2f}%"}), use_container_width=True)
+        with st.expander("Full 1H generic sweep stats"):
+            h1_full = add_scenario_column(h1_table, "1H")[["Setup", "Scenario", "Total Cases", "Reversal-Colour Cases", "Reversal-Colour %", "Failed-Sweep-Holds Cases", "Failed-Sweep-Holds %"]]
+            st.dataframe(h1_full.style.format({"Reversal-Colour %": "{:.2f}%", "Failed-Sweep-Holds %": "{:.2f}%"}), use_container_width=True)
         st.caption("These stats are conditional on the scenario shown. Failed-sweep-holds % means the next candle did not reclaim the swept level. Daily-colour continuation stats require the previous completed daily candle to be green or red.")
 
-    st.markdown("**4H Sweep / Failed Breakout Stats**")
+    st.markdown("**4H Generic Sweep / Failed Breakout Stats — All Candles**")
     if h4_df is None:
         st.info("Not enough data loaded to calculate this sweep stat.")
     else:
         h4_table, h4_metrics = compute_sweep_stats(h4_df)
-        h4_main = add_scenario_column(h4_table, "4H")
+        h4_main = add_scenario_column(h4_table, "4H")[["Setup", "Scenario", "Total Cases", "Reversal-Colour %", "Failed-Sweep-Holds %"]]
         st.dataframe(h4_main.style.format({"Reversal-Colour %": "{:.2f}%", "Failed-Sweep-Holds %": "{:.2f}%"}), use_container_width=True)
-        with st.expander("Full 4H sweep stats"):
-            st.dataframe(h4_main.style.format({"Reversal-Colour %": "{:.2f}%", "Failed-Sweep-Holds %": "{:.2f}%"}), use_container_width=True)
+        with st.expander("Full 4H generic sweep stats"):
+            h4_full = add_scenario_column(h4_table, "4H")[["Setup", "Scenario", "Total Cases", "Reversal-Colour Cases", "Reversal-Colour %", "Failed-Sweep-Holds Cases", "Failed-Sweep-Holds %"]]
+            st.dataframe(h4_full.style.format({"Reversal-Colour %": "{:.2f}%", "Failed-Sweep-Holds %": "{:.2f}%"}), use_container_width=True)
         st.caption("These stats are conditional on the scenario shown. Failed-sweep-holds % means the next candle did not reclaim the swept level. Daily-colour continuation stats require the previous completed daily candle to be green or red.")
 
-    st.markdown("**Core Session Sweep Stats**")
+    st.markdown("### 4) Core Session Sweep Stats")
     core_rows, debug_frames = [], []
     for tf, key in [("1H", h1_key), ("4H", h4_key)]:
         df = parsed.get(key)
@@ -580,39 +583,19 @@ def render_sweep_sections(parsed: dict[str, pd.DataFrame], instrument: str) -> N
         debug_frames.append(dbg)
     if core_rows:
         core_table = pd.DataFrame(core_rows)
-        st.dataframe(core_table.style.format({"Reversal-Colour %": "{:.2f}%", "Failed-Sweep-Holds %": "{:.2f}%"}), use_container_width=True)
+        core_summary = core_table[["Timeframe", "Setup", "Scenario", "Total Cases", "Reversal-Colour %", "Failed-Sweep-Holds %", "Session Used"]]
+        st.dataframe(core_summary.style.format({"Reversal-Colour %": "{:.2f}%", "Failed-Sweep-Holds %": "{:.2f}%"}), use_container_width=True)
+        with st.expander("Full core-session sweep stats"):
+            st.dataframe(core_table.style.format({"Reversal-Colour %": "{:.2f}%", "Failed-Sweep-Holds %": "{:.2f}%"}), use_container_width=True)
     else:
         st.info("Not enough data loaded to calculate this sweep stat.")
-
-    st.markdown("**High Probability Sweep Summary**")
-    summary = []
-    defs = {"Reversal colour": "Next candle colour reverses after the sweep.", "Failed sweep holds": "Next candle closes back inside the swept level."}
-    if core_rows:
-        all_rows = []
-        if h1_df is not None:
-            all_rows += [{"Timeframe": "1H", **r} for r in compute_sweep_stats(h1_df)[0].to_dict("records")]
-        if h4_df is not None:
-            all_rows += [{"Timeframe": "4H", **r} for r in compute_sweep_stats(h4_df)[0].to_dict("records")]
-        for row in all_rows:
-            scenario = add_scenario_column(pd.DataFrame([{"Setup": row["Setup"]}]), row["Timeframe"]).iloc[0]["Scenario"]
-            asset_label = "GER40 / DAX" if instrument == "GER40" else instrument
-            hold_pct = row["Failed-Sweep-Holds %"]
-            rev_pct = row["Reversal-Colour %"]
-            if hold_pct >= 60:
-                summary.append({"Asset": asset_label, "Timeframe": row["Timeframe"], "Scope": "All candles", "Setup": row["Setup"], "Scenario": scenario, "Probability Type": "Failed sweep holds", "Cases": int(row["Total Cases"]), "Probability %": hold_pct, "Definition": defs["Failed sweep holds"]})
-            if rev_pct >= 60:
-                summary.append({"Asset": asset_label, "Timeframe": row["Timeframe"], "Scope": "All candles", "Setup": row["Setup"], "Scenario": scenario, "Probability Type": "Reversal colour", "Cases": int(row["Total Cases"]), "Probability %": rev_pct, "Definition": defs["Reversal colour"]})
-    if summary:
-        st.dataframe(pd.DataFrame(summary).sort_values(["Asset", "Timeframe", "Probability Type"]), use_container_width=True)
-    else:
-        st.info("No high-probability sweep stats (>= 60%) found for this asset.")
 
     with st.expander("Core-session sweep debug"):
         if debug_frames:
             st.dataframe(pd.concat(debug_frames, ignore_index=True), use_container_width=True)
         else:
             st.info("No core-session rows available.")
-    with st.expander("Data validation details"):
+    with st.expander("Generic sweep debug"):
         rows = []
         for tf, key in [("1H", h1_key), ("4H", h4_key)]:
             df = parsed.get(key)
@@ -627,8 +610,9 @@ def render_sweep_sections(parsed: dict[str, pd.DataFrame], instrument: str) -> N
 
 def render_us_session_4h_sweep_edge(parsed: dict[str, pd.DataFrame], instrument: str) -> None:
     if instrument not in {"US500", "US30"}:
+        st.info("US Session 4H Sweep Edge applies only to US30 and US500.")
         return
-    st.markdown("**US Session 4H Sweep Edge**")
+    st.markdown("### 5) US Session 4H Sweep Edge")
     h4_key = f"{instrument}_4H"
     h4_df = parsed.get(h4_key)
     if h4_df is None:
@@ -641,19 +625,6 @@ def render_us_session_4h_sweep_edge(parsed: dict[str, pd.DataFrame], instrument:
         st.write(debug_counts)
         return
 
-    either_pct = float(table.iloc[0]["Breaks Either Side %"])
-    if either_pct >= 90:
-        tendency = "Very strong sweep tendency"
-    elif either_pct >= 70:
-        tendency = "Strong sweep tendency"
-    elif either_pct >= 60:
-        tendency = "Useful sweep tendency"
-    else:
-        tendency = "Weak sweep tendency"
-    candle_wording = "14:00–18:00" if instrument == "US500" else "15:00–19:00"
-    st.success(f"{tendency}: {instrument} {candle_wording} 4H candle swept the previous 4H high or low {either_pct:.2f}% of the time.")
-    st.caption("The edge is the liquidity take, not necessarily the reversal. Once the previous 4H high or low is swept, watch for acceptance versus failure.")
-    st.caption("Failed sweep percentages are calculated separately and should not be treated as the main edge unless they are also above 60%.")
     st.dataframe(
         table.style.format({
             "Breaks Previous High %": "{:.2f}%",
@@ -917,7 +888,7 @@ def compute_us_1h_daily_continuation_stats(parsed: dict[str, pd.DataFrame]) -> t
                 success_pct = np.nan if valid_cases == 0 else pct(success_cases, valid_cases)
                 if valid_cases == 0 and total_cases > 0:
                     note = "N/A — no later session candles"
-                scenario = "Previous daily candle green; selected 1H candle sweeps previous 1H low and closes back above it; later session tests upward through the opposite 1H level." if "green" in setup else "Previous daily candle red; selected 1H candle sweeps previous 1H high and closes back below it; later session tests downward through the opposite 1H level."
+                scenario = "Previous daily candle green; selected 1H candle sweeps previous 1H low and closes back above it; later session breaks upward through the opposite 1H level." if "green" in setup else "Previous daily candle red; selected 1H candle sweeps previous 1H high and closes back below it; later session breaks downward through the opposite 1H level."
                 cont_rows.append({"Asset": asset, "Hour": f"{hour:02d}:00", "Setup": "Bullish" if "green" in setup else "Bearish", "Scenario": scenario, "Total Cases": total_cases,
                                   "Successful Later Opposite-Level Break Cases": success_cases,
                                   "Success %": success_pct, "Note": note})
@@ -931,34 +902,14 @@ def compute_us_1h_daily_continuation_stats(parsed: dict[str, pd.DataFrame]) -> t
 
 
 def render_us_1h_daily_continuation_section(parsed: dict[str, pd.DataFrame]) -> None:
-    st.markdown("**US 1H Daily-Continuation Sweep Edge**")
+    st.markdown("### 6) US 1H Daily-Continuation Sweep Edge")
     raw, cont, debug = compute_us_1h_daily_continuation_stats(parsed)
     if raw.empty:
-        st.info("US500/US30 1H + daily files are required for this section.")
+        st.info("US 1H Daily-Continuation Sweep Edge applies only to US30 and US500.")
         return
-    st.caption("This is more directional than the raw sweep stat. The raw stat says the session candle often takes liquidity; this conditional stat checks whether a failed sweep then follows the previous daily direction.")
-
-    cards = []
-    us500_14 = cont[(cont["Asset"] == "US500") & (cont["Hour"] == "14:00")]
-    for _, r in us500_14.iterrows():
-        if pd.notna(r["Success %"]) and float(r["Success %"]) >= 70:
-            kind = str(r["Setup"]).lower()
-            cards.append(f"Strong {kind} continuation sweep edge: US500 14:00 success {float(r['Success %']):.2f}% (Cases: {int(r['Total Cases'])}).")
-    us30_rows = cont[cont["Asset"] == "US30"]
-    for _, r in us30_rows.iterrows():
-        if pd.notna(r["Success %"]) and float(r["Success %"]) >= 60 and int(r["Total Cases"]) >= 30:
-            cards.append(f"US30 {r['Hour']} qualified setup: success {float(r['Success %']):.2f}% (Cases: {int(r['Total Cases'])}).")
-    if cards:
-        for c in cards:
-            st.success(c)
-    else:
-        st.info("No high-probability continuation cards met the current thresholds.")
-
-    st.markdown("Raw 1H Sweep Tendency by Hour")
-    st.dataframe(raw.sort_values(["Asset", "Hour"]).style.format({c: "{:.2f}%" for c in raw.columns if c.endswith('%')}), use_container_width=True)
-    st.markdown("Daily-Colour 1H Sweep Continuation by Hour")
-    st.dataframe(cont.sort_values(["Asset", "Setup", "Hour"]).style.format({"Success %": lambda v: "N/A" if pd.isna(v) else f"{v:.2f}%"}), use_container_width=True)
-    with st.expander("US 1H Daily-Continuation Sweep Debug"):
+    table = cont[["Asset", "Hour", "Setup", "Scenario", "Total Cases", "Success %", "Note"]].copy()
+    st.dataframe(table.sort_values(["Asset", "Setup", "Hour"]).style.format({"Success %": lambda v: "N/A" if pd.isna(v) else f"{v:.2f}%"}), use_container_width=True)
+    with st.expander("US 1H daily-continuation sweep debug"):
         st.dataframe(debug.head(50), use_container_width=True)
 
 
@@ -1059,7 +1010,7 @@ def compute_uk_open_1h_daily_continuation_stats(parsed: dict[str, pd.DataFrame])
                 success_cases = int(set_rows[succ].eq(True).sum())
                 success_pct = np.nan if valid_cases == 0 else pct(success_cases, valid_cases)
                 note = "N/A — no later morning candles" if valid_cases == 0 and total_cases > 0 else ""
-                scenario = "Previous daily candle green; 08:00 1H candle sweeps previous 1H low and closes back above it; later morning tests upward through the opposite 1H level." if "green" in setup else "Previous daily candle red; 08:00 1H candle sweeps previous 1H high and closes back below it; later morning tests downward through the opposite 1H level."
+                scenario = "Previous daily candle green; 08:00 1H candle sweeps previous 1H low and closes back above it; later morning breaks upward through the opposite 1H level." if "green" in setup else "Previous daily candle red; 08:00 1H candle sweeps previous 1H high and closes back below it; later morning breaks downward through the opposite 1H level."
                 cont_rows.append({"Asset": "GER40 / DAX" if asset == "GER40" else asset, "Hour": f"{hour:02d}:00", "Scope": "UK open / expanded morning", "Session Window": "08:00–12:00 Europe/London", "Setup": "Bullish" if "green" in setup else "Bearish", "Scenario": scenario, "Total Cases": total_cases,
                                   "Successful Later Opposite-Level Break Cases": success_cases,
                                   "Success %": success_pct, "Note": note})
@@ -1073,42 +1024,14 @@ def compute_uk_open_1h_daily_continuation_stats(parsed: dict[str, pd.DataFrame])
 
 
 def render_uk_open_1h_daily_continuation_section(parsed: dict[str, pd.DataFrame]) -> None:
-    st.markdown("**UK Open 1H Daily-Continuation Sweep Edge**")
+    st.markdown("### 7) UK Open 1H Daily-Continuation Sweep Edge")
     raw, cont, debug = compute_uk_open_1h_daily_continuation_stats(parsed)
     if raw.empty:
-        st.info("GER40/UK100 1H + daily files are required for this section.")
+        st.info("UK Open 1H Daily-Continuation Sweep Edge applies only to GER40/DAX and UK100.")
         return
-    st.caption("This is more directional than the raw sweep stat. The raw stat says the UK open candle often takes liquidity; this conditional stat checks whether a failed sweep then follows the previous daily direction.")
-
-    card_specs = [
-        ("GER40 / DAX", "DAX", "Bullish", 70, "Strong bullish UK open continuation sweep edge"),
-        ("GER40 / DAX", "DAX", "Bearish", 70, "Strong bearish UK open continuation sweep edge"),
-        ("UK100", "UK100", "Bullish", 60, "Useful bullish UK open continuation sweep edge"),
-        ("UK100", "UK100", "Bearish", 60, "Useful bearish UK open continuation sweep edge"),
-    ]
-    shown = 0
-    for asset, label, setup, threshold, edge_label in card_specs:
-        row = cont[(cont["Asset"] == asset) & (cont["Hour"] == "08:00") & (cont["Setup"] == setup)]
-        if row.empty:
-            continue
-        r = row.iloc[0]
-        if pd.notna(r["Success %"]) and float(r["Success %"]) >= threshold:
-            direction = "upward" if setup == "Bullish" else "downward"
-            level_side = "low and closes back above it" if setup == "Bullish" else "high and closes back below it"
-            st.success(
-                f"{edge_label}. {label} 08:00 1H candle: "
-                f"If it sweeps the previous 1H {level_side}, price later broke {direction} through the opposite 1H level by 12:00 "
-                f"{float(r['Success %']):.2f}% of the time. Cases: {int(r['Total Cases'])}."
-            )
-            shown += 1
-    if shown == 0:
-        st.info("No high-probability continuation cards met the current thresholds.")
-
-    st.markdown("UK Open Raw 1H Sweep Tendency by Hour")
-    st.dataframe(raw.sort_values(["Asset", "Hour"]).style.format({c: "{:.2f}%" for c in raw.columns if c.endswith('%')}), use_container_width=True)
-    st.markdown("UK Open Daily-Colour 1H Sweep Continuation by Hour")
-    st.dataframe(cont.sort_values(["Asset", "Setup", "Hour"]).style.format({"Success %": lambda v: "N/A" if pd.isna(v) else f"{v:.2f}%"}), use_container_width=True)
-    with st.expander("UK Open 1H Daily-Continuation Sweep Debug"):
+    table = cont[["Asset", "Hour", "Setup", "Scenario", "Total Cases", "Success %", "Note"]].copy()
+    st.dataframe(table.sort_values(["Asset", "Setup", "Hour"]).style.format({"Success %": lambda v: "N/A" if pd.isna(v) else f"{v:.2f}%"}), use_container_width=True)
+    with st.expander("UK open 1H daily-continuation sweep debug"):
         st.dataframe(debug.head(50), use_container_width=True)
 
 def main() -> None:
@@ -1146,7 +1069,7 @@ def main() -> None:
         render_trading_view(parsed, drop_files)
 
     with ger40_tab:
-        st.markdown("**Daily attack stats**")
+        st.markdown("### 1) Daily Attack Stats")
         if "GER40_1D" in parsed:
             ger40_daily = compute_daily_attack_stats(parsed["GER40_1D"])
             st.dataframe(
@@ -1160,7 +1083,7 @@ def main() -> None:
         else:
             st.info("GER40 daily stats skipped (file unavailable or parse failed).")
 
-        st.markdown("**4H candle attack stats (session-specific candles)**")
+        st.markdown("### 2) 4H Daily-Level Attack Stats")
         if "GER40_1D" in parsed and "GER40_4H" in parsed:
             h4_stats, debug = compute_4h_attack_stats(parsed["GER40_1D"], parsed["GER40_4H"], instrument="GER40")
             st.dataframe(h4_stats.style.format({"Attack %": "{:.2f}%"}), use_container_width=True)
@@ -1184,7 +1107,7 @@ def main() -> None:
         render_sweep_sections(parsed, "GER40")
 
     with us30_tab:
-        st.markdown("**Daily attack stats**")
+        st.markdown("### 1) Daily Attack Stats")
         if "US30_1D" in parsed:
             us30_daily = compute_daily_attack_stats(parsed["US30_1D"])
             st.dataframe(
@@ -1198,7 +1121,7 @@ def main() -> None:
         else:
             st.info("US30 daily stats skipped (file unavailable or parse failed).")
 
-        st.markdown("**4H candle attack stats (session-specific candles)**")
+        st.markdown("### 2) 4H Daily-Level Attack Stats")
         if "US30_1D" in parsed and "US30_4H" in parsed:
             h4_stats, debug = compute_4h_attack_stats(parsed["US30_1D"], parsed["US30_4H"], instrument="US30")
             st.dataframe(h4_stats.style.format({"Attack %": "{:.2f}%"}), use_container_width=True)
@@ -1223,7 +1146,7 @@ def main() -> None:
         render_us_session_4h_sweep_edge(parsed, "US30")
 
     with us500_tab:
-        st.markdown("**Daily attack stats**")
+        st.markdown("### 1) Daily Attack Stats")
         if "US500_1D" in parsed:
             us500_daily = compute_daily_attack_stats(parsed["US500_1D"])
             st.dataframe(
@@ -1237,7 +1160,7 @@ def main() -> None:
         else:
             st.info("US500 daily stats skipped (file unavailable or parse failed).")
 
-        st.markdown("**4H candle attack stats (session-specific candles)**")
+        st.markdown("### 2) 4H Daily-Level Attack Stats")
         if "US500_1D" in parsed and "US500_4H" in parsed:
             h4_stats, debug = compute_4h_attack_stats(parsed["US500_1D"], parsed["US500_4H"], instrument="US500")
             st.dataframe(h4_stats.style.format({"Attack %": "{:.2f}%"}), use_container_width=True)
@@ -1263,7 +1186,7 @@ def main() -> None:
         render_us_1h_daily_continuation_section(parsed)
 
     with uk100_tab:
-        st.markdown("**Daily attack stats**")
+        st.markdown("### 1) Daily Attack Stats")
         if "UK100_1D" in parsed:
             uk100_daily = compute_daily_attack_stats(parsed["UK100_1D"])
             st.dataframe(
@@ -1274,7 +1197,7 @@ def main() -> None:
         else:
             st.info("UK100 daily stats skipped (file unavailable or parse failed).")
 
-        st.markdown("**4H candle attack stats (session-specific candles)**")
+        st.markdown("### 2) 4H Daily-Level Attack Stats")
         if "UK100_1D" in parsed and "UK100_4H" in parsed:
             h4_stats, debug = compute_4h_attack_stats(parsed["UK100_1D"], parsed["UK100_4H"], instrument="UK100")
             st.dataframe(h4_stats.style.format({"Attack %": "{:.2f}%"}), use_container_width=True)
