@@ -1445,22 +1445,25 @@ def main() -> None:
     if london_rows:
         st.dataframe(pd.DataFrame(london_rows).style.format({"Success %": "{:.2f}%"}), use_container_width=True, hide_index=True)
 
-    st.markdown("### 5. Core Sweep Context")
+    st.markdown("### 5. Core 1H Session Sweep Context")
     core = edge["core_sweep_context"]
-    st.dataframe(pd.DataFrame([
+    core_rows = [
         {
-            "Setup": "High sweep fails",
+            "Setup": "High sweep rejection",
+            "Scenario": "No daily bias used. During the asset’s core 1H trading session, price sweeps above the previous 1H high and closes back below it. Stat measures how often the next 1H candle also stays below that swept high.",
             "Session": core["session"],
             "Failed-Sweep Holds %": core["high_sweep_holds_failed_pct"],
-            "Interpretation": "No daily bias. Core-session high sweep closes back inside; next candle keeps swept high failed.",
+            "Interpretation": f"Swept high often remains failed on the next 1H candle. {classify_edge_strength(core['high_sweep_holds_failed_pct'])}.",
         },
         {
-            "Setup": "Low sweep fails",
+            "Setup": "Low sweep rejection",
+            "Scenario": "No daily bias used. During the asset’s core 1H trading session, price sweeps below the previous 1H low and closes back above it. Stat measures how often the next 1H candle also stays above that swept low.",
             "Session": core["session"],
             "Failed-Sweep Holds %": core["low_sweep_holds_failed_pct"],
-            "Interpretation": "No daily bias. Core-session low sweep closes back inside; next candle keeps swept low failed.",
+            "Interpretation": f"Swept low often remains failed on the next 1H candle. {classify_edge_strength(core['low_sweep_holds_failed_pct'])}.",
         },
-    ]).style.format({"Failed-Sweep Holds %": "{:.2f}%"}), use_container_width=True, hide_index=True)
+    ]
+    st.dataframe(pd.DataFrame(core_rows).style.format({"Failed-Sweep Holds %": "{:.2f}%"}), use_container_width=True, hide_index=True)
 
     if selected_asset in {"US30", "US500"}:
         st.markdown("### 6. US Session 4H Sweep Edge")
