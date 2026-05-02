@@ -992,6 +992,26 @@ EDGE_REGISTRY = {
             "session": "UK Open / Morning",
             "success_window": "later morning by 12:00",
         },
+        "amd_target_stats": {
+            "bearish": {
+                "scenario": "London sweeps Asia high and rejects. Test whether US attacks downside targets.",
+                "cases": 111,
+                "us_attacks_asia_low_pct": 69.37,
+                "us_attacks_london_low_pct": 38.74,
+            },
+            "bullish": {
+                "scenario": "London sweeps Asia low and reclaims. Test whether US attacks upside targets.",
+                "cases": 124,
+                "us_attacks_asia_high_pct": 60.48,
+                "us_attacks_london_high_pct": 40.32,
+            },
+            "london_direction": {
+                "london_bullish_cases": 201,
+                "london_bullish_us_breaks_london_high_pct": 55.22,
+                "london_bearish_cases": 178,
+                "london_bearish_us_breaks_london_low_pct": 44.38,
+            },
+        },
         "h4_edge_context": {
             "daily_bias_attack": {
                 "green_overlap_or_next_attacks_prev_high_pct": 69.23,
@@ -1027,6 +1047,26 @@ EDGE_REGISTRY = {
             "red_high_sweep_fail_cases": 59,
             "session": "UK Open / Morning",
             "success_window": "later morning by 12:00",
+        },
+        "amd_target_stats": {
+            "bearish": {
+                "scenario": "London sweeps Asia high and rejects. Test whether US attacks downside targets.",
+                "cases": 172,
+                "us_attacks_asia_low_pct": 62.79,
+                "us_attacks_london_low_pct": 48.26,
+            },
+            "bullish": {
+                "scenario": "London sweeps Asia low and reclaims. Test whether US attacks upside targets.",
+                "cases": 162,
+                "us_attacks_asia_high_pct": 67.90,
+                "us_attacks_london_high_pct": 50.00,
+            },
+            "london_direction": {
+                "london_bullish_cases": 272,
+                "london_bullish_us_breaks_london_high_pct": 58.09,
+                "london_bearish_cases": 237,
+                "london_bearish_us_breaks_london_low_pct": 57.81,
+            },
         },
         "h4_edge_context": {
             "daily_bias_attack": {
@@ -1064,6 +1104,26 @@ EDGE_REGISTRY = {
             "session": "US Session",
             "success_window": "later session by 19:00",
             "note": "US30 raw 15:00 sweep tendency was high, but daily-bias continuation was weaker and should be research-only for now.",
+        },
+        "amd_target_stats": {
+            "bearish": {
+                "scenario": "London sweeps Asia high and rejects. Test whether US attacks downside targets.",
+                "cases": 69,
+                "us_attacks_asia_low_pct": 88.41,
+                "us_attacks_london_low_pct": 75.36,
+            },
+            "bullish": {
+                "scenario": "London sweeps Asia low and reclaims. Test whether US attacks upside targets.",
+                "cases": 77,
+                "us_attacks_asia_high_pct": 77.92,
+                "us_attacks_london_high_pct": 45.45,
+            },
+            "london_direction": {
+                "london_bullish_cases": 111,
+                "london_bullish_us_breaks_london_high_pct": 63.96,
+                "london_bearish_cases": 87,
+                "london_bearish_us_breaks_london_low_pct": 74.71,
+            },
         },
         "h4_edge_context": {
             "daily_bias_attack": {
@@ -1119,6 +1179,26 @@ EDGE_REGISTRY = {
             "red_high_sweep_fail_cases": 84,
             "session": "US Session",
             "success_window": "later session by 18:00",
+        },
+        "amd_target_stats": {
+            "bearish": {
+                "scenario": "London sweeps Asia high and rejects. Test whether US attacks downside targets.",
+                "cases": 188,
+                "us_attacks_asia_low_pct": 71.28,
+                "us_attacks_london_low_pct": 61.70,
+            },
+            "bullish": {
+                "scenario": "London sweeps Asia low and reclaims. Test whether US attacks upside targets.",
+                "cases": 198,
+                "us_attacks_asia_high_pct": 72.22,
+                "us_attacks_london_high_pct": 61.11,
+            },
+            "london_direction": {
+                "london_bullish_cases": 308,
+                "london_bullish_us_breaks_london_high_pct": 69.48,
+                "london_bearish_cases": 265,
+                "london_bearish_us_breaks_london_low_pct": 61.51,
+            },
         },
         "h4_edge_context": {
             "daily_bias_attack": {
@@ -1294,7 +1374,78 @@ def main() -> None:
     else:
         st.info("No validated 1H daily-bias continuation edge for this asset yet. Keep this as research-only.")
 
-    st.markdown("### 4. Core Sweep Context")
+    def classify_edge_strength(value: float | None) -> str | None:
+        if value is None or pd.isna(value):
+            return None
+        if value >= 70:
+            return "Strong edge"
+        if value >= 60:
+            return "Useful edge"
+        return "Research only"
+
+    st.markdown("### 4. Asia → London → US AMD Target Stats")
+    st.caption("AMD model: Asia sets the range, London manipulates one side of Asia, then US may distribute toward the opposite Asia side or extend to the London high/low.")
+    st.caption("AMD session model: Asia range 23:00–08:00, London window 08:00–14:00, US distribution window 14:00–17:00 (Europe/London, 1H data with 14:00 overlap).")
+    amd = edge["amd_target_stats"]
+
+    st.markdown("**London Asia Sweep → US Target**")
+    amd_target_rows: list[dict] = []
+    bearish = amd["bearish"]
+    if all(k in bearish for k in ["cases", "us_attacks_asia_low_pct", "us_attacks_london_low_pct"]):
+        amd_target_rows.append({
+            "Setup": "Bearish AMD",
+            "Scenario": "AMD model used. London sweeps Asia high and rejects. Test whether US attacks Asia low first, then London low as extension.",
+            "Cases": bearish["cases"],
+            "First Target": "Asia low",
+            "First Target Attack %": bearish["us_attacks_asia_low_pct"],
+            "Extension Target": "London low",
+            "Extension Target Attack %": bearish["us_attacks_london_low_pct"],
+            "Edge Strength": classify_edge_strength(bearish["us_attacks_asia_low_pct"]),
+            "Interpretation": "Asia low is the more reliable first downside target. London low is the deeper extension target.",
+        })
+    bullish = amd["bullish"]
+    if all(k in bullish for k in ["cases", "us_attacks_asia_high_pct", "us_attacks_london_high_pct"]):
+        amd_target_rows.append({
+            "Setup": "Bullish AMD",
+            "Scenario": "AMD model used. London sweeps Asia low and reclaims. Test whether US attacks Asia high first, then London high as extension.",
+            "Cases": bullish["cases"],
+            "First Target": "Asia high",
+            "First Target Attack %": bullish["us_attacks_asia_high_pct"],
+            "Extension Target": "London high",
+            "Extension Target Attack %": bullish["us_attacks_london_high_pct"],
+            "Edge Strength": classify_edge_strength(bullish["us_attacks_asia_high_pct"]),
+            "Interpretation": "Asia high is the more reliable first upside target. London high is the deeper extension target.",
+        })
+    if amd_target_rows:
+        st.dataframe(pd.DataFrame(amd_target_rows).style.format({"First Target Attack %": "{:.2f}%", "Extension Target Attack %": "{:.2f}%"}), use_container_width=True, hide_index=True)
+
+    st.markdown("**London Direction → US London Range Break**")
+    london_dir = amd["london_direction"]
+    london_rows: list[dict] = []
+    if all(k in london_dir for k in ["london_bullish_cases", "london_bullish_us_breaks_london_high_pct"]):
+        london_rows.append({
+            "London Direction": "London bullish",
+            "Scenario": "AMD model used. London closes bullish. Test whether US breaks London high.",
+            "Cases": london_dir["london_bullish_cases"],
+            "US Target": "London high",
+            "Success %": london_dir["london_bullish_us_breaks_london_high_pct"],
+            "Edge Strength": classify_edge_strength(london_dir["london_bullish_us_breaks_london_high_pct"]),
+            "Interpretation": "Measures whether US continues London strength and attacks London high.",
+        })
+    if all(k in london_dir for k in ["london_bearish_cases", "london_bearish_us_breaks_london_low_pct"]):
+        london_rows.append({
+            "London Direction": "London bearish",
+            "Scenario": "AMD model used. London closes bearish. Test whether US breaks London low.",
+            "Cases": london_dir["london_bearish_cases"],
+            "US Target": "London low",
+            "Success %": london_dir["london_bearish_us_breaks_london_low_pct"],
+            "Edge Strength": classify_edge_strength(london_dir["london_bearish_us_breaks_london_low_pct"]),
+            "Interpretation": "Measures whether US continues London weakness and attacks London low.",
+        })
+    if london_rows:
+        st.dataframe(pd.DataFrame(london_rows).style.format({"Success %": "{:.2f}%"}), use_container_width=True, hide_index=True)
+
+    st.markdown("### 5. Core Sweep Context")
     core = edge["core_sweep_context"]
     st.dataframe(pd.DataFrame([
         {
@@ -1312,7 +1463,7 @@ def main() -> None:
     ]).style.format({"Failed-Sweep Holds %": "{:.2f}%"}), use_container_width=True, hide_index=True)
 
     if selected_asset in {"US30", "US500"}:
-        st.markdown("### 5. US Session 4H Sweep Edge")
+        st.markdown("### 6. US Session 4H Sweep Edge")
         us4h = edge["us_session_4h_sweep_edge"]
         session_candle = "15:00–19:00 vs previous 11:00–15:00" if selected_asset == "US30" else "14:00–18:00 vs previous 10:00–14:00"
         st.dataframe(pd.DataFrame([{
