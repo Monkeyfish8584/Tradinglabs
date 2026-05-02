@@ -540,7 +540,7 @@ def render_sweep_sections(parsed: dict[str, pd.DataFrame], instrument: str) -> N
     h1_df, h4_df = parsed.get(h1_key), parsed.get(h4_key)
     session_used = "08:00–10:00 Europe/London" if instrument in {"GER40", "UK100"} else "14:30–16:30 Europe/London"
 
-    st.markdown("### 3) Generic Sweep / Failed Breakout Stats")
+    st.markdown("### 4) No-Daily-Bias Sweep Context")
     st.markdown("**1H Generic Sweep / Failed Breakout Stats — All Candles**")
     if h1_df is None:
         st.info("Not enough data loaded to calculate this sweep stat.")
@@ -551,7 +551,7 @@ def render_sweep_sections(parsed: dict[str, pd.DataFrame], instrument: str) -> N
         with st.expander("Full 1H generic sweep stats"):
             h1_full = add_scenario_column(h1_table, "1H")[["Setup", "Scenario", "Total Cases", "Reversal-Colour Cases", "Reversal-Colour %", "Failed-Sweep-Holds Cases", "Failed-Sweep-Holds %"]]
             st.dataframe(h1_full.style.format({"Reversal-Colour %": "{:.2f}%", "Failed-Sweep-Holds %": "{:.2f}%"}), use_container_width=True)
-        st.caption("These stats are conditional on the scenario shown. Failed-sweep-holds % means the next candle did not reclaim the swept level. Daily-colour continuation stats require the previous completed daily candle to be green or red.")
+        st.caption("No daily bias used. These stats describe generic sweep/failure behaviour only.")
 
     st.markdown("**4H Generic Sweep / Failed Breakout Stats — All Candles**")
     if h4_df is None:
@@ -563,9 +563,9 @@ def render_sweep_sections(parsed: dict[str, pd.DataFrame], instrument: str) -> N
         with st.expander("Full 4H generic sweep stats"):
             h4_full = add_scenario_column(h4_table, "4H")[["Setup", "Scenario", "Total Cases", "Reversal-Colour Cases", "Reversal-Colour %", "Failed-Sweep-Holds Cases", "Failed-Sweep-Holds %"]]
             st.dataframe(h4_full.style.format({"Reversal-Colour %": "{:.2f}%", "Failed-Sweep-Holds %": "{:.2f}%"}), use_container_width=True)
-        st.caption("These stats are conditional on the scenario shown. Failed-sweep-holds % means the next candle did not reclaim the swept level. Daily-colour continuation stats require the previous completed daily candle to be green or red.")
+        st.caption("No daily bias used. These stats describe generic sweep/failure behaviour only.")
 
-    st.markdown("### 4) Core Session Sweep Stats")
+    st.markdown("**Core Session Sweep Stats**")
     core_rows, debug_frames = [], []
     for tf, key in [("1H", h1_key), ("4H", h4_key)]:
         df = parsed.get(key)
@@ -585,6 +585,7 @@ def render_sweep_sections(parsed: dict[str, pd.DataFrame], instrument: str) -> N
         core_table = pd.DataFrame(core_rows)
         core_summary = core_table[["Timeframe", "Setup", "Scenario", "Total Cases", "Reversal-Colour %", "Failed-Sweep-Holds %", "Session Used"]]
         st.dataframe(core_summary.style.format({"Reversal-Colour %": "{:.2f}%", "Failed-Sweep-Holds %": "{:.2f}%"}), use_container_width=True)
+        st.caption("No daily bias used. These stats describe generic sweep/failure behaviour only.")
         with st.expander("Full core-session sweep stats"):
             st.dataframe(core_table.style.format({"Reversal-Colour %": "{:.2f}%", "Failed-Sweep-Holds %": "{:.2f}%"}), use_container_width=True)
     else:
@@ -904,17 +905,31 @@ def compute_1h_daily_bias_continuation_sweep_edge(parsed: dict[str, pd.DataFrame
     return pd.DataFrame(cont_rows), (pd.concat(debug_rows, ignore_index=True) if debug_rows else pd.DataFrame())
 
 
-def render_1h_daily_bias_continuation_sweep_edge(parsed: dict[str, pd.DataFrame]) -> None:
-    st.markdown("### 6) 1H Daily-Bias Continuation Sweep Edge")
-    st.caption("Uses previous daily candle colour.")
+def render_1h_daily_bias_continuation_sweep_edge(parsed: dict[str, pd.DataFrame], instrument: str | None = None, show_debug: bool = True) -> None:
+    st.markdown("### 3) Daily-Bias Edge Stats")
+    st.markdown("**1H Daily-Bias Continuation Sweep Edge**")
+    st.caption("Uses previous completed daily candle colour. These stats test whether a failed 1H sweep later continues in the direction implied by the previous daily candle.")
+
     cont, debug = compute_1h_daily_bias_continuation_sweep_edge(parsed)
     if cont.empty:
         st.info("1H Daily-Bias Continuation Sweep Edge requires 1H + 1D files for GER40, UK100, US30, and US500.")
         return
+
+    if instrument is not None:
+        asset_labels = {"GER40": "GER40 / DAX", "UK100": "UK100", "US30": "US30", "US500": "US500"}
+        cont = cont[cont["Asset"] == asset_labels.get(instrument, instrument)].copy()
+
+    main_hours = {"GER40 / DAX": "08:00", "UK100": "08:00", "US500": "14:00", "US30": "15:00"}
     table = cont[["Asset", "Session", "Hour", "Setup", "Scenario", "Total Cases", "Successful Continuation Cases", "Success %"]].copy()
+    table = table[(table["Success %"] >= 60) | (table.apply(lambda r: r["Hour"] == main_hours.get(r["Asset"], ""), axis=1))].copy()
     st.dataframe(table.sort_values(["Asset", "Hour", "Setup"]).style.format({"Success %": lambda v: "N/A" if pd.isna(v) else f"{v:.2f}%"}), use_container_width=True)
-    with st.expander("1H daily-bias continuation sweep debug"):
-        st.dataframe(debug.head(50), use_container_width=True)
+
+    if show_debug:
+        with st.expander("1H daily-bias continuation debug"):
+            dbg = debug.copy()
+            if instrument is not None:
+                dbg = dbg[dbg["asset"] == instrument]
+            st.dataframe(dbg.head(200), use_container_width=True)
 
 def main() -> None:
     st.set_page_config(page_title="Trading Dashboard Data Hub", layout="wide")
@@ -949,7 +964,7 @@ def main() -> None:
 
     with trading_tab:
         render_trading_view(parsed, drop_files)
-        render_1h_daily_bias_continuation_sweep_edge(parsed)
+        render_1h_daily_bias_continuation_sweep_edge(parsed, show_debug=True)
 
     with ger40_tab:
         st.markdown("### 1) Daily Attack Stats")
@@ -987,6 +1002,7 @@ def main() -> None:
                     st.warning("Validation warning: total 4H matched cases are unexpectedly low.")
         else:
             st.info("GER40 4H candle stats skipped (required GER40 daily/4H file unavailable or parse failed).")
+        render_1h_daily_bias_continuation_sweep_edge(parsed, instrument="GER40", show_debug=True)
         render_sweep_sections(parsed, "GER40")
 
     with us30_tab:
@@ -1025,6 +1041,7 @@ def main() -> None:
                     st.warning("Validation warning: total 4H matched cases are unexpectedly low.")
         else:
             st.info("US30 4H candle stats skipped (required US30 daily/4H file unavailable or parse failed).")
+        render_1h_daily_bias_continuation_sweep_edge(parsed, instrument="US30", show_debug=True)
         render_sweep_sections(parsed, "US30")
         render_us_session_4h_sweep_edge(parsed, "US30")
 
@@ -1064,6 +1081,7 @@ def main() -> None:
                     st.warning("Validation warning: total 4H matched cases are unexpectedly low.")
         else:
             st.info("US500 4H candle stats skipped (required US500 daily/4H file unavailable or parse failed).")
+        render_1h_daily_bias_continuation_sweep_edge(parsed, instrument="US500", show_debug=True)
         render_sweep_sections(parsed, "US500")
         render_us_session_4h_sweep_edge(parsed, "US500")
 
@@ -1099,6 +1117,7 @@ def main() -> None:
                     st.warning("Validation warning: total 4H matched cases are unexpectedly low.")
         else:
             st.info("UK100 4H candle stats skipped (required UK100 daily/4H file unavailable or parse failed).")
+        render_1h_daily_bias_continuation_sweep_edge(parsed, instrument="UK100", show_debug=True)
         render_sweep_sections(parsed, "UK100")
 
         st.markdown("**1H file status (loaded + validated for future 08:00–10:00 precision analysis)**")
