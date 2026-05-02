@@ -1,0 +1,25 @@
+Asset,4H Candle Group,Scenario,Total Cases,Successful Attacks,Attack %
+GER40,Core-session overlap 4H candle,Uses previous daily candle colour. After green prev completed daily candle → attacks prev completed daily high,19,9,47.368421052631575
+GER40,Core-session overlap 4H candle,Uses previous daily candle colour. After red prev completed daily candle → attacks prev completed daily low,35,22,62.857142857142854
+GER40,Next 4H candle,Uses previous daily candle colour. After green prev completed daily candle → attacks prev completed daily high,19,13,68.42105263157895
+GER40,Next 4H candle,Uses previous daily candle colour. After red prev completed daily candle → attacks prev completed daily low,35,23,65.71428571428571
+GER40,Overlap OR next 4H candle,Uses previous daily candle colour. After green prev completed daily candle → attacks prev completed daily high,19,13,68.42105263157895
+GER40,Overlap OR next 4H candle,Uses previous daily candle colour. After red prev completed daily candle → attacks prev completed daily low,35,23,65.71428571428571
+UK100,Core-session overlap 4H candle,Uses previous daily candle colour. After green prev completed daily candle → attacks prev completed daily high,1227,666,54.278728606356964
+UK100,Core-session overlap 4H candle,Uses previous daily candle colour. After red prev completed daily candle → attacks prev completed daily low,1070,453,42.33644859813084
+UK100,Next 4H candle,Uses previous daily candle colour. After green prev completed daily candle → attacks prev completed daily high,1226,607,49.51060358890702
+UK100,Next 4H candle,Uses previous daily candle colour. After red prev completed daily candle → attacks prev completed daily low,1071,413,38.56209150326798
+UK100,Overlap OR next 4H candle,Uses previous daily candle colour. After green prev completed daily candle → attacks prev completed daily high,1227,759,61.858190709046454
+UK100,Overlap OR next 4H candle,Uses previous daily candle colour. After red prev completed daily candle → attacks prev completed daily low,1070,524,48.97196261682243
+US30,Core-session overlap 4H candle,Uses previous daily candle colour. After green prev completed daily candle → attacks prev completed daily high,185,98,52.972972972972975
+US30,Core-session overlap 4H candle,Uses previous daily candle colour. After red prev completed daily candle → attacks prev completed daily low,154,81,52.5974025974026
+US30,Next 4H candle,Uses previous daily candle colour. After green prev completed daily candle → attacks prev completed daily high,185,86,46.48648648648649
+US30,Next 4H candle,Uses previous daily candle colour. After red prev completed daily candle → attacks prev completed daily low,154,80,51.94805194805194
+US30,Overlap OR next 4H candle,Uses previous daily candle colour. After green prev completed daily candle → attacks prev completed daily high,185,105,56.75675675675676
+US30,Overlap OR next 4H candle,Uses previous daily candle colour. After red prev completed daily candle → attacks prev completed daily low,154,93,60.3896103896104
+US500,Core-session overlap 4H candle,Uses previous daily candle colour. After green prev completed daily candle → attacks prev completed daily high,368,211,57.33695652173913
+US500,Core-session overlap 4H candle,Uses previous daily candle colour. After red prev completed daily candle → attacks prev completed daily low,300,117,39.0
+US500,Next 4H candle,Uses previous daily candle colour. After green prev completed daily candle → attacks prev completed daily high,366,230,62.841530054644814
+US500,Next 4H candle,Uses previous daily candle colour. After red prev completed daily candle → attacks prev completed daily low,302,140,46.35761589403973
+US500,Overlap OR next 4H candle,Uses previous daily candle colour. After green prev completed daily candle → attacks prev completed daily high,368,261,70.92391304347827
+US500,Overlap OR next 4H candle,Uses previous daily candle colour. After red prev completed daily candle → attacks prev completed daily low,300,160,53.333333333333336

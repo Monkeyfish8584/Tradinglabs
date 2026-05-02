@@ -1,0 +1,81 @@
+{
+  "precomputed_at_utc": "2026-05-02T15:09:55.528070+00:00",
+  "script": "scripts/precompute_stats.py",
+  "git_commit": "76a56a3731daca0f55ab7fa20dfb0d412e12162c",
+  "input_files": [
+    {
+      "file": "github_data/dropzone/BLACKBULL_US30, 1D.csv",
+      "rows": 300,
+      "date_start_utc": "2025-01-04T00:00:00+00:00",
+      "date_end_utc": "2026-12-03T00:00:00+00:00"
+    },
+    {
+      "file": "github_data/dropzone/CAPITALCOM_UK100, 1D.csv",
+      "rows": 2621,
+      "date_start_utc": "2014-11-26T22:00:00+00:00",
+      "date_end_utc": "2026-04-29T21:00:00+00:00"
+    },
+    {
+      "file": "github_data/dropzone/CAPITALCOM_UK100, 240.csv",
+      "rows": 13579,
+      "date_start_utc": "2017-05-01T21:00:00+00:00",
+      "date_end_utc": "2026-04-30T17:00:00+00:00"
+    },
+    {
+      "file": "github_data/dropzone/CAPITALCOM_UK100, 60.csv",
+      "rows": 11996,
+      "date_start_utc": "2024-05-06T05:00:00+00:00",
+      "date_end_utc": "2026-04-30T18:00:00+00:00"
+    },
+    {
+      "file": "github_data/dropzone/CAPITALCOM_US30, 240.csv",
+      "rows": 4286,
+      "date_start_utc": "2023-07-25T05:00:00+00:00",
+      "date_end_utc": "2026-04-30T17:00:00+00:00"
+    },
+    {
+      "file": "github_data/dropzone/CAPITALCOM_US30, 60.csv",
+      "rows": 4734,
+      "date_start_utc": "2025-07-22T17:00:00+00:00",
+      "date_end_utc": "2026-04-30T18:00:00+00:00"
+    },
+    {
+      "file": "github_data/dropzone/FOREXCOM_GER40, 60.csv",
+      "rows": 8956,
+      "date_start_utc": "2024-11-07T17:00:00+00:00",
+      "date_end_utc": "2026-04-30T18:00:00+00:00"
+    },
+    {
+      "file": "github_data/dropzone/PEPPERSTONE_US500, 1D.csv",
+      "rows": 2528,
+      "date_start_utc": "2016-07-24T22:00:00+00:00",
+      "date_end_utc": "2026-04-29T22:00:00+00:00"
+    },
+    {
+      "file": "github_data/dropzone/PEPPERSTONE_US500, 240.csv",
+      "rows": 3984,
+      "date_start_utc": "2023-09-27T02:00:00+00:00",
+      "date_end_utc": "2026-04-30T18:00:00+00:00"
+    },
+    {
+      "file": "github_data/dropzone/PEPPERSTONE_US500, 60.csv",
+      "rows": 13204,
+      "date_start_utc": "2024-02-02T05:00:00+00:00",
+      "date_end_utc": "2026-04-30T18:00:00+00:00"
+    },
+    {
+      "file": "github_data/dropzone/VANTAGE_GER40, 1D.csv",
+      "rows": 300,
+      "date_start_utc": "2025-01-04T00:00:00+00:00",
+      "date_end_utc": "2026-12-03T00:00:00+00:00"
+    },
+    {
+      "file": "github_data/dropzone/VANTAGE_GER40, 240.csv",
+      "rows": 300,
+      "date_start_utc": "2026-02-05T21:15:00+00:00",
+      "date_end_utc": "2026-04-24T16:15:00+00:00"
+    }
+  ],
+  "warnings": [],
+  "failures": []
+}

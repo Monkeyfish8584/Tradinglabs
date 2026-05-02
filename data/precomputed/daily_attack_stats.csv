@@ -1,0 +1,9 @@
+Asset,Scenario,Total Cases,Successful Attacks,Attack %,Close Beyond Prev Level,Close Beyond %
+GER40,Uses previous daily candle colour. Previous daily green → next day breaks previous high,147,96,65.3061224489796,53,36.054421768707485
+GER40,Uses previous daily candle colour. Previous daily red → next day breaks previous low,151,84,55.62913907284768,55,36.423841059602644
+UK100,Uses previous daily candle colour. Previous daily green → next day breaks previous high,1396,991,70.98853868194843,468,33.5243553008596
+UK100,Uses previous daily candle colour. Previous daily red → next day breaks previous low,1221,777,63.63636363636363,376,30.794430794430795
+US30,Uses previous daily candle colour. Previous daily green → next day breaks previous high,152,107,70.39473684210526,74,48.68421052631579
+US30,Uses previous daily candle colour. Previous daily red → next day breaks previous low,145,89,61.37931034482759,52,35.86206896551724
+US500,Uses previous daily candle colour. Previous daily green → next day breaks previous high,1384,1022,73.84393063583815,567,40.96820809248555
+US500,Uses previous daily candle colour. Previous daily red → next day breaks previous low,1134,716,63.13932980599647,328,28.92416225749559
