@@ -996,8 +996,51 @@ def main() -> None:
         if ts:
             st.caption(f"Precomputed timestamp (UTC): {ts}")
     elif not ENABLE_LIVE_RECALC:
-        st.error("Required precomputed summary files not found. Run scripts/precompute_stats.py.")
-        return
+        st.error("Precomputed stats not found. Run scripts/precompute_stats.py to generate them.")
+    for warning_msg in parse_warnings:
+        st.warning(warning_msg)
+    for failure_msg in parse_failures:
+        st.error(failure_msg)
+
+    st.markdown("#### Dashboard Tabs")
+    trading_tab, ger40_tab, uk100_tab, us30_tab, us500_tab = st.tabs(["Trading View", "GER40", "UK100", "US30", "US500"])
+
+    with trading_tab:
+        if use_precomputed:
+            st.markdown("### Precomputed Mode")
+            st.caption("Live stat recalculation is disabled. Set ENABLE_LIVE_RECALC=true for development-only live recompute.")
+            st.dataframe(precomputed["daily"].style.format({"Attack %": "{:.2f}%", "Close Beyond %": "{:.2f}%"}), use_container_width=True)
+        else:
+            render_trading_view(parsed, drop_files)
+            render_1h_daily_bias_continuation_sweep_edge(parsed, show_debug=True)
+
+    def render_asset_tab(asset: str):
+        st.markdown("### 1) Daily Attack Stats")
+        if use_precomputed:
+            st.dataframe(precomputed["daily"].query("Asset == @asset").style.format({"Attack %": "{:.2f}%", "Close Beyond %": "{:.2f}%"}), use_container_width=True)
+            st.markdown("### 2) 4H Daily-Bias Attack Stats")
+            st.dataframe(precomputed["h4_attack"].query("Asset == @asset").style.format({"Attack %": "{:.2f}%"}), use_container_width=True)
+            st.markdown("### 3) 1H Daily-Bias Continuation Sweep Edge")
+            labels={"GER40":"GER40 / DAX","UK100":"UK100","US30":"US30","US500":"US500"}
+            asset_label = labels.get(asset, asset)
+            h1_cont = precomputed["h1_cont"]
+            h1_cont_asset = h1_cont[h1_cont["Asset"] == asset_label].copy()
+            st.dataframe(h1_cont_asset.style.format({"Success %": lambda v: "N/A" if pd.isna(v) else f"{v:.2f}%"}), use_container_width=True)
+            st.markdown("### 4) Generic Sweep / Failed Breakout Stats")
+            st.dataframe(precomputed["generic"].query("Asset == @asset").style.format({"Reversal-Colour %": "{:.2f}%", "Failed-Sweep-Holds %": "{:.2f}%"}), use_container_width=True)
+            st.markdown("### 5) Core Session Sweep Stats")
+            st.dataframe(precomputed["core"].query("Asset == @asset").style.format({"Reversal-Colour %": "{:.2f}%", "Failed-Sweep-Holds %": "{:.2f}%"}), use_container_width=True)
+            st.markdown("### 6) US Session 4H Sweep Edge")
+            us=precomputed["us4h"].query("Asset == @asset") if asset in ["US30","US500"] else pd.DataFrame()
+            st.dataframe(us.style.format({"Breaks Previous High %": "{:.2f}%", "Breaks Previous Low %": "{:.2f}%", "Breaks Either Side %": "{:.2f}%", "Breaks Both Sides %": "{:.2f}%", "High Break Fails %": "{:.2f}%", "Low Break Fails %": "{:.2f}%"}), use_container_width=True) if not us.empty else st.info("US Session 4H Sweep Edge applies only to US30 and US500.")
+            st.markdown("### 7) Debug / Validation")
+            st.json(precomputed.get("meta") or {})
+        elif ENABLE_LIVE_RECALC:
+            st.info("Live recalculation enabled (ENABLE_LIVE_RECALC=true).")
+            # fallback to existing runtime sections
+            daily_key=f"{asset}_1D"
+            if daily_key in parsed:
+                st.dataframe(compute_daily_attack_stats(parsed[daily_key]).style.format({"Attack %":"{:.2f}%","Close Beyond %":"{:.2f}%"}), use_container_width=True)
 
     labels = {"GER40": "GER40 / DAX", "UK100": "UK100", "US30": "US30", "US500": "US500"}
 
