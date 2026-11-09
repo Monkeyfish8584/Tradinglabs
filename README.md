@@ -44,3 +44,11 @@ To keep Streamlit fast, heavy stat calculations are precomputed and committed.
    ```
 3. Commit the updated files under `data/precomputed/`.
 4. Run Streamlit (`streamlit run app.py`) — the app reads precomputed stats and loads quickly.
+
+## Stock research dashboard and Cursor workspace
+
+The stock valuation and short-squeeze research dashboard is in [research-desk/](research-desk/). It includes automatic thesis drafts, price and trend commentary, CANSLIM evidence, manual refresh, sourced overrides and persistent notes.
+
+Open [Tradinglabs.code-workspace](Tradinglabs.code-workspace) in Cursor to work on both applications. [CURSOR_HANDOFF.md](CURSOR_HANDOFF.md) maps the code, explains the local runtimes and provides a starting prompt. Follow [research-desk/START-HERE.md](research-desk/START-HERE.md) for the dashboard’s first-time database setup.
+
+The Streamlit trading-statistics app runs from the repository root. The research desk runs from its own folder with separate Node dependencies and local storage. Each app’s run commands are included in the workspace’s Terminal > Run Task menu.

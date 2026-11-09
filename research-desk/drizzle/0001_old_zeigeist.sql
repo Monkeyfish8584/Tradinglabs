@@ -1,0 +1,1 @@
+ALTER TABLE `desk_stocks` ADD `research` text DEFAULT '{}' NOT NULL;
