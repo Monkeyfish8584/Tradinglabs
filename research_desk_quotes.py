@@ -7,6 +7,7 @@ field stays missing. Nothing here is estimated.
 
 from __future__ import annotations
 
+import copy
 import json
 import math
 import re
@@ -251,12 +252,53 @@ def _apply_source(snapshot: dict, key: str, name: str, url: str, parser, getter)
     snapshot["sources"][key] = {"name": name, "url": url, "fetchedAt": now}
 
 
+def yahoo_chart_url(ticker: str) -> str:
+    return f"https://query1.finance.yahoo.com/v8/finance/chart/{urllib.parse.quote(ticker)}?interval=1d&range=1y"
+
+
+def refresh_quote(snapshot: dict, getter=None) -> dict:
+    """Replace the quote on a copy of ``snapshot``. Other stored fields stay as they are.
+
+    Yahoo Finance supplies the price, session change, and daily closes. Analyst
+    targets, EPS, short interest, and borrow fields are left untouched. Raises
+    QuoteError when Yahoo does not return a price, in which case the caller
+    should keep the previous snapshot.
+    """
+    ticker = normalize_ticker(str(snapshot.get("ticker") or ""))
+    get = getter or fetch_text
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    quote_url = yahoo_chart_url(ticker)
+    try:
+        parsed = parse_yahoo_chart(get(quote_url), ticker)
+    except Exception as exc:
+        message = str(exc).strip()
+        if message.startswith("Provider") or message.startswith("Feed"):
+            raise QuoteError(f"{ticker}: {message}") from exc
+        raise QuoteError(f"{ticker} did not return a price from Yahoo Finance. The stored price was kept.") from exc
+    updated = copy.deepcopy(snapshot)
+    for field, value in parsed.items():
+        if value is not None:
+            updated[field] = value
+    updated["ticker"] = ticker
+    volume = updated.get("volume")
+    average = updated.get("averageVolume")
+    if isinstance(volume, (int, float)) and isinstance(average, (int, float)) and not isinstance(volume, bool) and not isinstance(average, bool) and average:
+        updated["relativeVolume"] = volume / average
+    sources = updated.get("sources")
+    if not isinstance(sources, dict):
+        sources = {}
+        updated["sources"] = sources
+    sources["quote"] = {"name": "Yahoo Finance", "url": quote_url, "fetchedAt": now, "asOf": updated.get("quoteAt")}
+    updated["quoteFetchedAt"] = now
+    return updated
+
+
 def fetch_new_snapshot(raw: str, getter=None) -> dict:
     """Return a snapshot for one new ticker. Raises QuoteError when the price is missing."""
     ticker = normalize_ticker(raw)
     get = getter or fetch_text
     now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    quote_url = f"https://query1.finance.yahoo.com/v8/finance/chart/{urllib.parse.quote(ticker)}?interval=1d&range=1y"
+    quote_url = yahoo_chart_url(ticker)
     snapshot: dict = {"ticker": ticker, "name": ticker, "sources": {}, "attemptedAt": now, "origin": "fetched"}
     try:
         snapshot.update(parse_yahoo_chart(get(quote_url), ticker))

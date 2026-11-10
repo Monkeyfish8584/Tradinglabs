@@ -11,7 +11,10 @@ sys.path.insert(0, str(ROOT))
 from research_desk_page import (
     THESES,
     daily_trend,
+    format_uk,
+    load_quote_cache,
     load_snapshots,
+    save_quote_cache,
     squeeze_checks,
     thesis_for,
     trend_text,
@@ -21,7 +24,14 @@ from research_desk_page import (
     watchlist_rows,
     weekly_trend,
 )
-from research_desk_quotes import QuoteError, fetch_new_snapshot, number_value, parse_forecast_html, parse_statistics_html
+from research_desk_quotes import (
+    QuoteError,
+    fetch_new_snapshot,
+    number_value,
+    parse_forecast_html,
+    parse_statistics_html,
+    refresh_quote,
+)
 
 
 def test_seed_tickers_and_missing_forward_pe() -> None:
@@ -111,6 +121,9 @@ def test_daily_and_weekly_trends_use_stored_series() -> None:
     assert 'href="?ticker=USAR"' in table
     assert 'href="?ticker=NVO"' in table
     assert "Daily trend" in table and "Weekly trend" in table
+    assert "Price as of" in table
+    assert rows["USAR"]["quote_at"] == "30 Oct 2026, 18:36 UK"
+    assert format_uk("2026-07-30T12:00:00Z") == "30 Jul 2026, 13:00 UK"
 
 
 def test_added_snapshot_uses_only_returned_fields() -> None:
@@ -185,6 +198,72 @@ def test_added_snapshot_uses_only_returned_fields() -> None:
         raise AssertionError("invalid ticker was accepted")
 
 
+def test_refresh_quote_updates_price_and_keeps_fundamentals() -> None:
+    usar = next(row for row in load_snapshots() if row["ticker"] == "USAR")
+    stored_price = usar["price"]
+    yahoo = {
+        "chart": {
+            "result": [
+                {
+                    "meta": {
+                        "longName": "USA Rare Earth, Inc.",
+                        "currency": "USD",
+                        "regularMarketPrice": 21.5,
+                        "regularMarketChangePercent": 2.25,
+                        "regularMarketTime": 1762800000,
+                        "regularMarketVolume": 2500,
+                        "exchangeName": "NGM",
+                    },
+                    "timestamp": [1762800000 - i * 86400 for i in range(6, 0, -1)],
+                    "indicators": {"quote": [{"close": [18, 19, 20, 20.5, 21, 21.5], "volume": [1, 1, 1, 1, 1, 2500]}]},
+                }
+            ]
+        }
+    }
+
+    def getter(url: str) -> str:
+        if "query1.finance.yahoo.com" not in url or "/USAR?" not in url:
+            raise RuntimeError(f"unexpected {url}")
+        return __import__("json").dumps(yahoo)
+
+    updated = refresh_quote(usar, getter)
+    assert updated is not usar
+    assert usar["price"] == stored_price
+    assert updated["price"] == 21.5
+    assert updated["changePct"] == 2.25
+    assert updated["target"] == usar["target"]
+    assert updated["eps"] == usar["eps"]
+    assert updated["shortFloatPct"] == usar["shortFloatPct"]
+    assert updated["borrowFee"] == usar["borrowFee"]
+    assert updated["closes"][-1] == 21.5
+    assert weekly_trend(updated) == (21.5 / 18 - 1) * 100
+    assert updated["relativeVolume"] == 2500 / usar["averageVolume"]
+    assert updated["quoteFetchedAt"]
+    assert updated["sources"]["quote"]["name"] == "Yahoo Finance"
+    assert "stockanalysis.com" not in updated["sources"]["quote"]["url"]
+
+    def fail(url: str) -> str:
+        raise RuntimeError("Provider rate limit; try again later")
+
+    try:
+        refresh_quote(usar, fail)
+    except QuoteError as exc:
+        assert "USAR" in str(exc)
+        assert "rate limit" in str(exc)
+    else:
+        raise AssertionError("a failed refresh was treated as a new price")
+    assert usar["price"] == stored_price
+    page = (ROOT / "research_desk_page.py").read_text(encoding="utf-8")
+    assert 'st.button("Refresh prices")' in page
+    cache = ROOT / "tests" / "_quote_cache.json"
+    save_quote_cache({"refreshed": {"USAR": {"ticker": "USAR", "price": 21.5}}, "added": {}, "refresh_at": "2026-11-10T09:40:00Z", "errors": []}, cache)
+    loaded = load_quote_cache(cache)
+    assert loaded["refreshed"]["USAR"]["price"] == 21.5
+    assert loaded["refresh_at"] == "2026-11-10T09:40:00Z"
+    cache.unlink()
+    assert load_quote_cache(cache) == {}
+
+
 def test_trading_edge_page_remains_the_default() -> None:
     source = (ROOT / "app.py").read_text(encoding="utf-8")
     assert 'st.title("Validated Trading Edge Dashboard")' in source
@@ -203,5 +282,6 @@ if __name__ == "__main__":
     test_valuation_sentence_uses_stored_numbers_only()
     test_daily_and_weekly_trends_use_stored_series()
     test_added_snapshot_uses_only_returned_fields()
+    test_refresh_quote_updates_price_and_keeps_fundamentals()
     test_trading_edge_page_remains_the_default()
     print("Research desk snapshot checks passed.")
