@@ -10,16 +10,22 @@ from __future__ import annotations
 
 import html
 import json
+import tempfile
+from datetime import datetime, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 import streamlit as st
 
-from research_desk_quotes import QuoteError, fetch_new_snapshot, normalize_ticker
+from research_desk_quotes import QuoteError, fetch_new_snapshot, normalize_ticker, refresh_quote
+
+LONDON = ZoneInfo("Europe/London")
 
 BASE_DIR = Path(__file__).resolve().parent
 BOOTSTRAP_PATH = BASE_DIR / "research-desk" / "lib" / "bootstrap.json"
 RESEARCH_ENGINE_PATH = BASE_DIR / "research-desk" / "lib" / "research.ts"
+QUOTE_CACHE_PATH = Path(tempfile.gettempdir()) / "tradinglabs-desk-quotes.json"
 
 # Ticker playbooks copied from companyCases in research-desk/lib/research.ts.
 # Titles, cases, proof and invalidation are qualitative. They do not add prices.
@@ -69,6 +75,31 @@ SQUEEZE_RULES: tuple[tuple[str, str, object], ...] = (
     ("Available shares ≤ 100k", "available", lambda n: n <= 100_000),
     ("Day volume / 20d avg ≥ 1.5×", "relativeVolume", lambda n: n >= 1.5),
 )
+
+
+def load_quote_cache(path: Path | None = None) -> dict:
+    """Read refreshed quotes saved for this running app. A missing or broken file is empty."""
+    cache_path = QUOTE_CACHE_PATH if path is None else path
+    try:
+        payload = json.loads(cache_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    if not isinstance(payload, dict):
+        return {}
+    refreshed = payload.get("refreshed")
+    added = payload.get("added")
+    errors = payload.get("errors")
+    return {
+        "refreshed": refreshed if isinstance(refreshed, dict) else {},
+        "added": added if isinstance(added, dict) else {},
+        "refresh_at": payload.get("refresh_at") if isinstance(payload.get("refresh_at"), str) else None,
+        "errors": [str(item) for item in errors] if isinstance(errors, list) else [],
+    }
+
+
+def save_quote_cache(payload: dict, path: Path | None = None) -> None:
+    cache_path = QUOTE_CACHE_PATH if path is None else path
+    cache_path.write_text(json.dumps(payload), encoding="utf-8")
 
 
 def load_snapshots() -> list[dict]:
@@ -186,11 +217,21 @@ def _count(value: object) -> str | None:
     return f"{float(value):,.2f}".rstrip("0").rstrip(".")
 
 
-def _quote_label(snapshot: dict) -> str | None:
-    quote_at = snapshot.get("quoteAt")
-    if not isinstance(quote_at, str) or len(quote_at) < 16:
+def format_uk(raw: object) -> str | None:
+    """Format an ISO timestamp in UK local time."""
+    if not isinstance(raw, str) or len(raw) < 16:
         return None
-    return quote_at.replace("T", " ")[:16] + " UTC"
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(LONDON).strftime("%d %b %Y, %H:%M UK")
+
+
+def _quote_label(snapshot: dict) -> str | None:
+    return format_uk(snapshot.get("quoteAt"))
 
 
 def watchlist_rows(snapshots: list[dict] | None = None) -> list[dict]:
@@ -234,6 +275,7 @@ def display_watchlist(rows: list[dict]) -> pd.DataFrame:
                 "Ticker": row["ticker"],
                 "Company": row["name"],
                 "Price": _money(row["price"]) or "Not in snapshot",
+                "Price as of": row["quote_at"] or "Not in snapshot",
                 "Daily trend": trend_text(row["daily_trend"]),
                 "Weekly trend": trend_text(row["weekly_trend"]),
                 "Analyst target": _money(row["target"]) or "Not in snapshot",
@@ -331,20 +373,39 @@ def render_research_desk() -> None:
         "USAR, IBRX, ALMU, NVO, UUUU and SMR start from the seeded snapshots in research-desk/lib/bootstrap.json. "
         "Add a ticker to fetch a quote from Yahoo Finance and valuation fields from Stock Analysis. "
         "A figure stays blank when that source does not publish it. "
-        "Names you add stay in this browser session and are not written back to the repo. "
+        "Names you add, and prices you refresh, stay on this running app until it restarts. "
+        "They are not written back to the repo. "
         "Thesis text is the ticker playbook in research-desk/lib/research.ts."
     )
 
-    if "desk_added" not in st.session_state:
-        st.session_state.desk_added = {}
+    _hydrate_quotes()
 
     with st.form("add_ticker", clear_on_submit=True):
         entered = st.text_input("Add a ticker", placeholder="AAPL")
         add = st.form_submit_button("Add to watchlist")
+    refresh = st.button("Refresh prices")
     if add:
         _add_ticker(entered)
+    if refresh:
+        _refresh_prices()
 
-    snapshots = [*load_snapshots(), *st.session_state.desk_added.values()]
+    refreshed_at = format_uk(st.session_state.get("desk_refresh_at"))
+    if refreshed_at:
+        st.caption(
+            f"Last price refresh: {refreshed_at}. "
+            "Price as of is the exchange time of that quote. "
+            "Analyst targets, EPS and short-interest figures are left as stored."
+        )
+    else:
+        st.caption(
+            "Price as of is the exchange time stored with each snapshot. "
+            "Refresh prices fetches the latest Yahoo Finance quote for every row. "
+            "Analyst targets, EPS and short-interest figures are left as stored."
+        )
+    for message in st.session_state.get("desk_refresh_errors") or []:
+        st.error(message)
+
+    snapshots = _current_snapshots()
     if not snapshots:
         st.warning("No seeded snapshots were found in research-desk/lib/bootstrap.json.")
         return
@@ -383,6 +444,67 @@ def render_research_desk() -> None:
     _render_detail(snapshot)
 
 
+def _remember_quotes() -> None:
+    try:
+        save_quote_cache(
+            {
+                "refreshed": st.session_state.desk_refreshed,
+                "added": st.session_state.desk_added,
+                "refresh_at": st.session_state.get("desk_refresh_at"),
+                "errors": st.session_state.get("desk_refresh_errors") or [],
+            }
+        )
+    except OSError:
+        st.warning("The new prices are showing, but they could not be saved for the next page load.")
+
+
+def _hydrate_quotes() -> None:
+    if st.session_state.get("desk_hydrated"):
+        return
+    cached = load_quote_cache()
+    st.session_state.desk_refreshed = cached.get("refreshed") or {}
+    st.session_state.desk_added = cached.get("added") or {}
+    st.session_state.desk_refresh_at = cached.get("refresh_at")
+    st.session_state.desk_refresh_errors = cached.get("errors") or []
+    st.session_state.desk_hydrated = True
+
+
+def _current_snapshots() -> list[dict]:
+    overrides = st.session_state.get("desk_refreshed") or {}
+    combined = [*load_snapshots(), *st.session_state.desk_added.values()]
+    current: list[dict] = []
+    for snapshot in combined:
+        ticker = str(snapshot.get("ticker") or "")
+        current.append(overrides.get(ticker, snapshot))
+    return current
+
+
+def _refresh_prices() -> None:
+    current = _current_snapshots()
+    refreshed = dict(st.session_state.desk_refreshed)
+    errors: list[str] = []
+    updated = 0
+    with st.spinner("Refreshing prices from Yahoo Finance…"):
+        for snapshot in current:
+            ticker = str(snapshot.get("ticker") or "")
+            try:
+                refreshed[ticker] = refresh_quote(snapshot)
+            except QuoteError as exc:
+                errors.append(str(exc))
+                continue
+            updated += 1
+            if ticker in st.session_state.desk_added:
+                st.session_state.desk_added[ticker] = refreshed[ticker]
+    st.session_state.desk_refreshed = refreshed
+    st.session_state.desk_refresh_errors = errors
+    if updated:
+        st.session_state.desk_refresh_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        st.success(f"Updated {updated} price{'s' if updated != 1 else ''}.")
+    elif not errors:
+        st.warning("There are no stocks to refresh.")
+    _remember_quotes()
+
+
 def _add_ticker(raw: str) -> None:
     try:
         ticker = normalize_ticker(raw)
@@ -403,6 +525,7 @@ def _add_ticker(raw: str) -> None:
             st.error(str(exc))
             return
     st.session_state.desk_added[ticker] = snapshot
+    _remember_quotes()
     st.query_params["ticker"] = ticker
     st.success(f"Added {ticker}. Blank fields were not published by the source.")
 
@@ -412,8 +535,15 @@ def _render_detail(snapshot: dict) -> None:
     st.subheader(f"{ticker} · {snapshot.get('name') or 'Name not in snapshot'}")
     quote = _quote_label(snapshot)
     if quote:
-        kind = "Fetched" if snapshot.get("origin") == "fetched" else "Stored"
-        st.caption(f"{kind} regular-session quote: {quote}.")
+        if snapshot.get("quoteFetchedAt"):
+            kind = "Refreshed"
+        elif snapshot.get("origin") == "fetched":
+            kind = "Fetched"
+        else:
+            kind = "Stored"
+        pulled = format_uk(snapshot.get("quoteFetchedAt"))
+        extra = f" Pulled {pulled}." if pulled else ""
+        st.caption(f"{kind} regular-session quote: {quote}.{extra}")
     st.caption(
         f"Daily trend: {trend_text(daily_trend(snapshot))}. "
         f"Weekly trend: {trend_text(weekly_trend(snapshot))}."
@@ -456,9 +586,12 @@ def _render_detail(snapshot: dict) -> None:
         chart = pd.DataFrame({"Close": closes})
         if isinstance(close_dates, list) and len(close_dates) == len(closes):
             chart.index = close_dates
-        st.markdown("**Stored daily closes**")
+        st.markdown("**Daily closes**")
         st.line_chart(chart, height=180)
-        st.caption("Closes stored with the snapshot. This is the saved series, not a forecast.")
+        if snapshot.get("quoteFetchedAt"):
+            st.caption("Daily closes from the refreshed Yahoo quote. This is not a forecast.")
+        else:
+            st.caption("Closes stored with the snapshot. This is the saved series, not a forecast.")
 
     thesis = thesis_for(ticker)
     st.markdown("**Thesis**")
