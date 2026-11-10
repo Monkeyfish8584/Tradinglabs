@@ -11,16 +11,16 @@ from __future__ import annotations
 import html
 import json
 import tempfile
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from zoneinfo import ZoneInfo
 
 import pandas as pd
 import streamlit as st
 
 from research_desk_quotes import QuoteError, fetch_new_snapshot, normalize_ticker, refresh_quote
 
-LONDON = ZoneInfo("Europe/London")
+CLOSE_WINDOWS = (30, 60, 90)
+DEFAULT_CLOSE_WINDOW = 60
 
 BASE_DIR = Path(__file__).resolve().parent
 BOOTSTRAP_PATH = BASE_DIR / "research-desk" / "lib" / "bootstrap.json"
@@ -120,30 +120,118 @@ def upside(snapshot: dict) -> float | None:
     return None
 
 
-def _series_return(closes: object, sessions_back: int) -> float | None:
+def _close_pairs(snapshot: dict) -> list[tuple[date | None, float]]:
+    closes = snapshot.get("closes")
     if not isinstance(closes, list):
+        return []
+    dates = snapshot.get("closeDates")
+    pairs: list[tuple[date | None, float]] = []
+    for index, close in enumerate(closes):
+        if isinstance(close, bool) or not isinstance(close, (int, float)):
+            continue
+        day = None
+        if isinstance(dates, list) and index < len(dates) and isinstance(dates[index], str):
+            try:
+                day = date.fromisoformat(dates[index][:10])
+            except ValueError:
+                day = None
+        pairs.append((day, float(close)))
+    if pairs and all(day is not None for day, _ in pairs):
+        pairs.sort(key=lambda item: item[0] or date.min)
+    return pairs
+
+
+def _closes(snapshot: dict) -> list[float]:
+    return [close for _, close in _close_pairs(snapshot)]
+
+
+def daily_trend(snapshot: dict) -> str | None:
+    """Up or Down only when the latest close is beyond each of the previous three closes."""
+    values = _closes(snapshot)
+    if len(values) < 4:
         return None
-    values = [float(item) for item in closes if isinstance(item, (int, float)) and not isinstance(item, bool)]
-    if len(values) <= sessions_back:
+    latest = values[-1]
+    previous = values[-4:-1]
+    if all(latest > item for item in previous):
+        return "Up"
+    if all(latest < item for item in previous):
+        return "Down"
+    return "Flat"
+
+
+def weekly_trend(snapshot: dict) -> str | None:
+    """This week's close compared with the previous week's close."""
+    pairs = _close_pairs(snapshot)
+    if not pairs or any(day is None for day, _ in pairs):
         return None
-    base = values[-1 - sessions_back]
-    last = values[-1]
-    if base <= 0:
+    latest_day = pairs[-1][0]
+    if latest_day is None:
         return None
-    return (last / base - 1) * 100
+    this_key = latest_day.isocalendar()[:2]
+    previous_key = (latest_day - timedelta(days=7)).isocalendar()[:2]
+    this_closes = [close for day, close in pairs if day is not None and day.isocalendar()[:2] == this_key]
+    previous_closes = [close for day, close in pairs if day is not None and day.isocalendar()[:2] == previous_key]
+    if not this_closes or not previous_closes:
+        return None
+    this_close = this_closes[-1]
+    previous_close = previous_closes[-1]
+    if this_close > previous_close:
+        return "Up"
+    if this_close < previous_close:
+        return "Down"
+    return "Flat"
 
 
-def daily_trend(snapshot: dict) -> float | None:
-    """Session change from the quote, or the last two stored closes when that is missing."""
-    change = snapshot.get("changePct")
-    if isinstance(change, (int, float)) and not isinstance(change, bool):
-        return float(change)
-    return _series_return(snapshot.get("closes"), 1)
+def rsi_14(snapshot: dict) -> float | None:
+    """Wilder RSI(14) of the stored daily closes. Missing history stays missing."""
+    values = _closes(snapshot)
+    if len(values) < 15:
+        return None
+    changes = [values[index] - values[index - 1] for index in range(1, len(values))]
+    gains = [max(change, 0.0) for change in changes]
+    losses = [max(-change, 0.0) for change in changes]
+    average_gain = sum(gains[:14]) / 14
+    average_loss = sum(losses[:14]) / 14
+    for gain, loss in zip(gains[14:], losses[14:]):
+        average_gain = (average_gain * 13 + gain) / 14
+        average_loss = (average_loss * 13 + loss) / 14
+    if average_gain == 0 and average_loss == 0:
+        return None
+    if average_loss == 0:
+        return 100.0
+    strength = average_gain / average_loss
+    return 100 - (100 / (1 + strength))
 
 
-def weekly_trend(snapshot: dict) -> float | None:
-    """Latest stored close versus the close five trading sessions earlier."""
-    return _series_return(snapshot.get("closes"), 5)
+def average_position(snapshot: dict) -> str | None:
+    """Whether the price is above or below the daily 200-day moving average."""
+    values = _closes(snapshot)
+    if len(values) < 200:
+        return None
+    average = sum(values[-200:]) / 200
+    price = snapshot.get("price")
+    if isinstance(price, bool) or not isinstance(price, (int, float)):
+        price = values[-1]
+    if float(price) > average:
+        return "Above"
+    if float(price) < average:
+        return "Below"
+    return "At the average"
+
+
+def close_window(snapshot: dict, days: int) -> tuple[list[float], list[str] | None]:
+    """Closes inside the last ``days`` calendar days, ending on the latest stored close."""
+    pairs = _close_pairs(snapshot)
+    if not pairs:
+        return [], None
+    if any(day is None for day, _ in pairs):
+        return [close for _, close in pairs], None
+    latest = pairs[-1][0]
+    if latest is None:
+        return [close for _, close in pairs], None
+    start = latest - timedelta(days=days - 1)
+    chosen = [(day, close) for day, close in pairs if day is not None and day >= start]
+    return [close for _, close in chosen], [day.isoformat() for day, _ in chosen]
 
 
 def squeeze_checks(snapshot: dict) -> list[dict]:
@@ -184,15 +272,23 @@ def _money(value: object, *, signed: bool = False) -> str | None:
 
 
 def trend_text(value: object) -> str:
-    if not isinstance(value, (int, float)) or isinstance(value, bool):
-        return "Not in snapshot"
-    if abs(float(value)) < 0.005:
-        direction = "Flat"
-    elif value > 0:
-        direction = "Up"
-    else:
-        direction = "Down"
-    return f"{direction} {_percent(value, 2, signed=True)}"
+    if value in {"Up", "Down", "Flat"}:
+        return str(value)
+    return "Not enough closes"
+
+
+def rsi_text(snapshot: dict) -> str:
+    value = rsi_14(snapshot)
+    if value is None:
+        return "Not enough closes"
+    return f"{value:.1f}"
+
+
+def average_text(snapshot: dict) -> str:
+    position = average_position(snapshot)
+    if position is None:
+        return "Not enough closes"
+    return position
 
 
 def _percent(value: object, digits: int = 1, *, signed: bool = False) -> str | None:
@@ -217,23 +313,6 @@ def _count(value: object) -> str | None:
     return f"{float(value):,.2f}".rstrip("0").rstrip(".")
 
 
-def format_uk(raw: object) -> str | None:
-    """Format an ISO timestamp in UK local time."""
-    if not isinstance(raw, str) or len(raw) < 16:
-        return None
-    try:
-        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
-    except ValueError:
-        return None
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
-    return parsed.astimezone(LONDON).strftime("%d %b %Y, %H:%M UK")
-
-
-def _quote_label(snapshot: dict) -> str | None:
-    return format_uk(snapshot.get("quoteAt"))
-
-
 def watchlist_rows(snapshots: list[dict] | None = None) -> list[dict]:
     rows: list[dict] = []
     for snapshot in snapshots if snapshots is not None else load_snapshots():
@@ -249,6 +328,8 @@ def watchlist_rows(snapshots: list[dict] | None = None) -> list[dict]:
                 "price": snapshot.get("price") if isinstance(snapshot.get("price"), (int, float)) else None,
                 "daily_trend": daily_trend(snapshot),
                 "weekly_trend": weekly_trend(snapshot),
+                "rsi": rsi_text(snapshot),
+                "average": average_text(snapshot),
                 "target": snapshot.get("target") if isinstance(snapshot.get("target"), (int, float)) else None,
                 "upside": gap,
                 "eps": snapshot.get("eps") if isinstance(snapshot.get("eps"), (int, float)) else None,
@@ -256,7 +337,6 @@ def watchlist_rows(snapshots: list[dict] | None = None) -> list[dict]:
                 "thesis": None if thesis is None else thesis["title"],
                 "squeeze_met": met,
                 "squeeze_unknown": unknown,
-                "quote_at": _quote_label(snapshot),
             }
         )
     rows.sort(key=lambda row: (row["upside"] is None, -(row["upside"] or 0), str(row["ticker"])))
@@ -275,9 +355,12 @@ def display_watchlist(rows: list[dict]) -> pd.DataFrame:
                 "Ticker": row["ticker"],
                 "Company": row["name"],
                 "Price": _money(row["price"]) or "Not in snapshot",
-                "Price as of": row["quote_at"] or "Not in snapshot",
                 "Daily trend": trend_text(row["daily_trend"]),
+                "Daily RSI (14)": row["rsi"],
+                "Daily 200-day average": row["average"],
                 "Weekly trend": trend_text(row["weekly_trend"]),
+                "Weekly RSI (14)": row["rsi"],
+                "Weekly 200-day average": row["average"],
                 "Analyst target": _money(row["target"]) or "Not in snapshot",
                 "Upside": _percent(row["upside"], 1, signed=True) or "Not in snapshot",
                 "EPS (TTM)": _money(row["eps"]) or "Not in snapshot",
@@ -383,32 +466,22 @@ def render_research_desk() -> None:
     with st.form("add_ticker", clear_on_submit=True):
         entered = st.text_input("Add a ticker", placeholder="AAPL")
         add = st.form_submit_button("Add to watchlist")
-    refresh = st.button("Refresh prices")
     if add:
         _add_ticker(entered)
-    if refresh:
-        _refresh_prices()
-
-    refreshed_at = format_uk(st.session_state.get("desk_refresh_at"))
-    if refreshed_at:
-        st.caption(
-            f"Last price refresh: {refreshed_at}. "
-            "Price as of is the exchange time of that quote. "
-            "Analyst targets, EPS and short-interest figures are left as stored."
-        )
-    else:
-        st.caption(
-            "Price as of is the exchange time stored with each snapshot. "
-            "Refresh prices fetches the latest Yahoo Finance quote for every row. "
-            "Analyst targets, EPS and short-interest figures are left as stored."
-        )
-    for message in st.session_state.get("desk_refresh_errors") or []:
-        st.error(message)
 
     snapshots = _current_snapshots()
     if not snapshots:
         st.warning("No seeded snapshots were found in research-desk/lib/bootstrap.json.")
         return
+
+    _, refresh_col = st.columns([4, 1])
+    with refresh_col:
+        refresh = st.button("Refresh prices", width="stretch")
+    if refresh:
+        _refresh_prices()
+        snapshots = _current_snapshots()
+    for message in st.session_state.get("desk_refresh_errors") or []:
+        st.error(message)
 
     rows, by_ticker = _watchlist(snapshots)
     st.markdown(
@@ -427,8 +500,10 @@ def render_research_desk() -> None:
     st.markdown(watchlist_html(rows), unsafe_allow_html=True)
     st.caption(
         "Click a ticker or company in the table to open it. "
-        "Daily trend is the session change on the quote. "
-        "Weekly trend is the latest close in the saved series versus the close five trading sessions earlier. "
+        "Daily trend is Up when the latest close is higher than each of the previous three daily closes, and Down when it is lower than each of them. Otherwise it is Flat. "
+        "Weekly trend compares this week's close with the previous week's close: Up when it is higher, Down when it is lower, and Flat when they are equal. "
+        "RSI (14) and the 200-day moving average are daily readings, shown on the daily view and the weekly view. "
+        "The 200-day average needs 200 stored daily closes. "
         "Upside is the average analyst target divided by the price, minus one. "
         "The squeeze column counts how many of the five repo heuristics are met. Unknown inputs stay unknown and are not treated as zero."
     )
@@ -530,24 +605,38 @@ def _add_ticker(raw: str) -> None:
     st.success(f"Added {ticker}. Blank fields were not published by the source.")
 
 
+def _view_lines(snapshot: dict, trend: str | None) -> None:
+    st.write(f"Trend: {trend_text(trend)}.")
+    st.write(f"RSI (14): {rsi_text(snapshot)}.")
+    st.write(f"200-day moving average: {average_text(snapshot)}.")
+
+
+def _render_closes(snapshot: dict) -> None:
+    window = st.radio(
+        "Daily closes",
+        options=list(CLOSE_WINDOWS),
+        index=CLOSE_WINDOWS.index(DEFAULT_CLOSE_WINDOW),
+        format_func=lambda days: f"{days} days",
+        horizontal=True,
+        key="desk_close_window",
+    )
+    closes, close_dates = close_window(snapshot, int(window))
+    if not closes:
+        st.caption("No daily closes are stored for this stock.")
+        return
+    chart = pd.DataFrame({"Close": closes})
+    if close_dates is not None:
+        chart.index = close_dates
+        st.line_chart(chart, height=180)
+        st.caption(f"Closes from the last {int(window)} days. This is not a forecast.")
+        return
+    st.line_chart(chart, height=180)
+    st.caption("Close dates are not stored, so the 30, 60 and 90 day choices cannot be applied.")
+
+
 def _render_detail(snapshot: dict) -> None:
     ticker = str(snapshot.get("ticker"))
     st.subheader(f"{ticker} · {snapshot.get('name') or 'Name not in snapshot'}")
-    quote = _quote_label(snapshot)
-    if quote:
-        if snapshot.get("quoteFetchedAt"):
-            kind = "Refreshed"
-        elif snapshot.get("origin") == "fetched":
-            kind = "Fetched"
-        else:
-            kind = "Stored"
-        pulled = format_uk(snapshot.get("quoteFetchedAt"))
-        extra = f" Pulled {pulled}." if pulled else ""
-        st.caption(f"{kind} regular-session quote: {quote}.{extra}")
-    st.caption(
-        f"Daily trend: {trend_text(daily_trend(snapshot))}. "
-        f"Weekly trend: {trend_text(weekly_trend(snapshot))}."
-    )
 
     gap = upside(snapshot)
     large_gap = gap is not None and gap >= 50
@@ -556,8 +645,7 @@ def _render_detail(snapshot: dict) -> None:
     unknown = sum(1 for check in checks if not check["known"])
 
     metrics = st.columns(6)
-    price_delta = _percent(snapshot.get("changePct"), 2, signed=True)
-    metrics[0].metric("Price", _money(snapshot.get("price")) or "—", delta=price_delta)
+    metrics[0].metric("Price", _money(snapshot.get("price")) or "—")
     target_help = None
     analyst_count = snapshot.get("analystCount")
     if isinstance(analyst_count, (int, float)) and not isinstance(analyst_count, bool):
@@ -580,18 +668,12 @@ def _render_detail(snapshot: dict) -> None:
         help=f"{unknown} unknown" if unknown else "All five inputs are stored on this snapshot",
     )
 
-    closes = snapshot.get("closes")
-    close_dates = snapshot.get("closeDates")
-    if isinstance(closes, list) and closes:
-        chart = pd.DataFrame({"Close": closes})
-        if isinstance(close_dates, list) and len(close_dates) == len(closes):
-            chart.index = close_dates
-        st.markdown("**Daily closes**")
-        st.line_chart(chart, height=180)
-        if snapshot.get("quoteFetchedAt"):
-            st.caption("Daily closes from the refreshed Yahoo quote. This is not a forecast.")
-        else:
-            st.caption("Closes stored with the snapshot. This is the saved series, not a forecast.")
+    st.markdown("**Daily**")
+    _view_lines(snapshot, daily_trend(snapshot))
+    _render_closes(snapshot)
+
+    st.markdown("**Weekly**")
+    _view_lines(snapshot, weekly_trend(snapshot))
 
     thesis = thesis_for(ticker)
     st.markdown("**Thesis**")

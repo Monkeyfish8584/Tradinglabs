@@ -183,7 +183,7 @@ def parse_yahoo_chart(body: str, ticker: str) -> dict:
         volume = _finite(volumes[index] if index < len(volumes) else None)
         when = datetime.fromtimestamp(int(stamp), timezone.utc).date().isoformat()
         points.append({"date": when, "close": close, "high": high if high is not None else close, "low": low if low is not None else close, "volume": volume})
-    recent = points[-63:]
+    recent = points[-520:]
     volume_window = [point["volume"] for point in points[-21:-1] if point["volume"] is not None]
     average_volume = sum(volume_window) / len(volume_window) if len(volume_window) >= 10 else None
     change = _finite(meta.get("regularMarketChangePercent"))
@@ -253,7 +253,7 @@ def _apply_source(snapshot: dict, key: str, name: str, url: str, parser, getter)
 
 
 def yahoo_chart_url(ticker: str) -> str:
-    return f"https://query1.finance.yahoo.com/v8/finance/chart/{urllib.parse.quote(ticker)}?interval=1d&range=1y"
+    return f"https://query1.finance.yahoo.com/v8/finance/chart/{urllib.parse.quote(ticker)}?interval=1d&range=2y"
 
 
 def refresh_quote(snapshot: dict, getter=None) -> dict:

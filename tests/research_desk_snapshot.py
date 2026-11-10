@@ -8,12 +8,18 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
+from datetime import date, timedelta
+
 from research_desk_page import (
+    CLOSE_WINDOWS,
+    DEFAULT_CLOSE_WINDOW,
     THESES,
+    average_position,
+    close_window,
     daily_trend,
-    format_uk,
     load_quote_cache,
     load_snapshots,
+    rsi_14,
     save_quote_cache,
     squeeze_checks,
     thesis_for,
@@ -102,28 +108,87 @@ def test_valuation_sentence_uses_stored_numbers_only() -> None:
     assert "$3.86" in nvo_sentence
 
 
+def _label_from_closes(latest: float, previous: list[float]) -> str:
+    if all(latest > item for item in previous):
+        return "Up"
+    if all(latest < item for item in previous):
+        return "Down"
+    return "Flat"
+
+
+def _week_label(dates: list[str], closes: list[float]) -> str | None:
+    pairs = [(date.fromisoformat(day), close) for day, close in zip(dates, closes)]
+    latest_day = pairs[-1][0]
+    this_key = latest_day.isocalendar()[:2]
+    previous_key = (latest_day - timedelta(days=7)).isocalendar()[:2]
+    this_closes = [close for day, close in pairs if day.isocalendar()[:2] == this_key]
+    previous_closes = [close for day, close in pairs if day.isocalendar()[:2] == previous_key]
+    if not this_closes or not previous_closes:
+        return None
+    if this_closes[-1] > previous_closes[-1]:
+        return "Up"
+    if this_closes[-1] < previous_closes[-1]:
+        return "Down"
+    return "Flat"
+
+
 def test_daily_and_weekly_trends_use_stored_series() -> None:
     snapshots = {row["ticker"]: row for row in load_snapshots()}
     usar = snapshots["USAR"]
     closes = usar["closes"]
-    assert daily_trend(usar) == usar["changePct"]
-    assert weekly_trend(usar) == (closes[-1] / closes[-6] - 1) * 100
+    assert daily_trend(usar) == _label_from_closes(closes[-1], closes[-4:-1])
+    assert daily_trend(usar) in {"Up", "Down", "Flat"}
+    assert weekly_trend(usar) == _week_label(usar["closeDates"], closes)
+    assert daily_trend({"closes": [1, 2, 3, 4]}) == "Up"
+    assert daily_trend({"closes": [4, 3, 2, 1]}) == "Down"
+    assert daily_trend({"closes": [1, 5, 2, 3]}) == "Flat"
+    assert daily_trend({"closes": [5, 4, 6, 5]}) == "Flat"
+    assert daily_trend({"closes": [10, 12]}) is None
+    assert trend_text(None) == "Not enough closes"
+    assert trend_text("Flat") == "Flat"
+    same_week = {"closes": [10, 11, 12], "closeDates": ["2026-10-26", "2026-10-27", "2026-10-28"]}
+    assert weekly_trend(same_week) is None
+    assert weekly_trend({"closes": [10, 12], "closeDates": ["2026-10-23", "2026-10-30"]}) == "Up"
+    assert weekly_trend({"closes": [12, 10], "closeDates": ["2026-10-23", "2026-10-30"]}) == "Down"
+    assert weekly_trend({"closes": [10, 10], "closeDates": ["2026-10-23", "2026-10-30"]}) == "Flat"
     assert weekly_trend({"closes": [1, 2, 3]}) is None
-    assert abs(daily_trend({"closes": [10, 12]}) - 20) < 1e-9
+    rising = list(range(1, 21))
+    assert rsi_14({"closes": rising}) == 100
+    assert rsi_14({"closes": list(reversed(rising))}) == 0
+    assert rsi_14({"closes": [1, 2, 3]}) is None
+    flat_ma = {"closes": [2.0] * 200, "price": 2.0}
+    assert average_position(flat_ma) == "At the average"
+    assert average_position({"closes": [1.0] * 199, "price": 5}) is None
+    assert average_position({"closes": [1.0] * 200, "price": 2}) == "Above"
+    assert average_position({"closes": [3.0] * 200, "price": 2}) == "Below"
+    windowed = {"closes": [float(day) for day in range(1, 31)], "closeDates": [f"2026-10-{day:02d}" for day in range(1, 31)]}
+    last_30, last_dates = close_window(windowed, 30)
+    assert last_dates[0] == "2026-10-01" and last_dates[-1] == "2026-10-30"
+    assert len(last_30) == 30
+    shorter, shorter_dates = close_window(windowed, 60)
+    assert shorter_dates[0] == "2026-10-01"
+    assert daily_trend(windowed) == daily_trend({"closes": windowed["closes"], "closeDates": windowed["closeDates"]})
+    assert DEFAULT_CLOSE_WINDOW == 60
+    assert set(CLOSE_WINDOWS) == {30, 60, 90}
     rows = {row["ticker"]: row for row in watchlist_rows()}
-    assert rows["USAR"]["daily_trend"] == usar["changePct"]
+    assert rows["USAR"]["daily_trend"] == daily_trend(usar)
     assert rows["USAR"]["weekly_trend"] == weekly_trend(usar)
-    assert trend_text(usar["changePct"]).startswith("Down ")
-    assert trend_text(None) == "Not in snapshot"
+    assert rows["USAR"]["rsi"] != "Not enough closes"
+    assert rows["USAR"]["average"] == "Not enough closes"
     page = (ROOT / "research_desk_page.py").read_text(encoding="utf-8")
     assert "Open a stock" not in page
+    assert "Price as of" not in page
+    assert "session change" not in page
+    assert 'st.button("Refresh prices"' in page
+    assert "width=\"stretch\"" in page
     table = watchlist_html(watchlist_rows())
     assert 'href="?ticker=USAR"' in table
     assert 'href="?ticker=NVO"' in table
     assert "Daily trend" in table and "Weekly trend" in table
-    assert "Price as of" in table
-    assert rows["USAR"]["quote_at"] == "30 Oct 2026, 18:36 UK"
-    assert format_uk("2026-07-30T12:00:00Z") == "30 Jul 2026, 13:00 UK"
+    assert "Daily RSI (14)" in table and "Weekly RSI (14)" in table
+    assert "Daily 200-day average" in table and "Weekly 200-day average" in table
+    assert "Price as of" not in table
+    assert " UK" not in table
 
 
 def test_added_snapshot_uses_only_returned_fields() -> None:
@@ -161,7 +226,7 @@ def test_added_snapshot_uses_only_returned_fields() -> None:
     </table>
     """
     pages = {
-        "https://query1.finance.yahoo.com/v8/finance/chart/EX?interval=1d&range=1y": __import__("json").dumps(yahoo),
+        "https://query1.finance.yahoo.com/v8/finance/chart/EX?interval=1d&range=2y": __import__("json").dumps(yahoo),
         "https://stockanalysis.com/stocks/ex/statistics/": stats,
         "https://stockanalysis.com/stocks/ex/forecast/": forecast,
     }
@@ -181,7 +246,8 @@ def test_added_snapshot_uses_only_returned_fields() -> None:
     assert snapshot["target"] == 30
     assert snapshot["shortFloatPct"] == 22
     assert "borrowFee" not in snapshot
-    assert weekly_trend(snapshot) == (16 / 10 - 1) * 100
+    assert daily_trend(snapshot) == "Up"
+    assert rsi_14(snapshot) is None
     assert number_value("n/a") is None
     assert parse_statistics_html(stats)["forwardPE"] is None
     try:
@@ -236,7 +302,7 @@ def test_refresh_quote_updates_price_and_keeps_fundamentals() -> None:
     assert updated["shortFloatPct"] == usar["shortFloatPct"]
     assert updated["borrowFee"] == usar["borrowFee"]
     assert updated["closes"][-1] == 21.5
-    assert weekly_trend(updated) == (21.5 / 18 - 1) * 100
+    assert daily_trend(updated) == "Up"
     assert updated["relativeVolume"] == 2500 / usar["averageVolume"]
     assert updated["quoteFetchedAt"]
     assert updated["sources"]["quote"]["name"] == "Yahoo Finance"
@@ -254,7 +320,7 @@ def test_refresh_quote_updates_price_and_keeps_fundamentals() -> None:
         raise AssertionError("a failed refresh was treated as a new price")
     assert usar["price"] == stored_price
     page = (ROOT / "research_desk_page.py").read_text(encoding="utf-8")
-    assert 'st.button("Refresh prices")' in page
+    assert 'st.button("Refresh prices"' in page
     cache = ROOT / "tests" / "_quote_cache.json"
     save_quote_cache({"refreshed": {"USAR": {"ticker": "USAR", "price": 21.5}}, "added": {}, "refresh_at": "2026-11-10T09:40:00Z", "errors": []}, cache)
     loaded = load_quote_cache(cache)
