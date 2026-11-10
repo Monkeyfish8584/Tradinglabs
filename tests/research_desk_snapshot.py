@@ -10,13 +10,18 @@ sys.path.insert(0, str(ROOT))
 
 from research_desk_page import (
     THESES,
+    daily_trend,
     load_snapshots,
     squeeze_checks,
     thesis_for,
+    trend_text,
     upside,
     valuation_sentence,
+    watchlist_html,
     watchlist_rows,
+    weekly_trend,
 )
+from research_desk_quotes import QuoteError, fetch_new_snapshot, number_value, parse_forecast_html, parse_statistics_html
 
 
 def test_seed_tickers_and_missing_forward_pe() -> None:
@@ -87,6 +92,99 @@ def test_valuation_sentence_uses_stored_numbers_only() -> None:
     assert "$3.86" in nvo_sentence
 
 
+def test_daily_and_weekly_trends_use_stored_series() -> None:
+    snapshots = {row["ticker"]: row for row in load_snapshots()}
+    usar = snapshots["USAR"]
+    closes = usar["closes"]
+    assert daily_trend(usar) == usar["changePct"]
+    assert weekly_trend(usar) == (closes[-1] / closes[-6] - 1) * 100
+    assert weekly_trend({"closes": [1, 2, 3]}) is None
+    assert abs(daily_trend({"closes": [10, 12]}) - 20) < 1e-9
+    rows = {row["ticker"]: row for row in watchlist_rows()}
+    assert rows["USAR"]["daily_trend"] == usar["changePct"]
+    assert rows["USAR"]["weekly_trend"] == weekly_trend(usar)
+    assert trend_text(usar["changePct"]).startswith("Down ")
+    assert trend_text(None) == "Not in snapshot"
+    page = (ROOT / "research_desk_page.py").read_text(encoding="utf-8")
+    assert "Open a stock" not in page
+    table = watchlist_html(watchlist_rows())
+    assert 'href="?ticker=USAR"' in table
+    assert 'href="?ticker=NVO"' in table
+    assert "Daily trend" in table and "Weekly trend" in table
+
+
+def test_added_snapshot_uses_only_returned_fields() -> None:
+    yahoo = {
+        "chart": {
+            "result": [
+                {
+                    "meta": {
+                        "longName": "Example Co",
+                        "currency": "USD",
+                        "regularMarketPrice": 20,
+                        "regularMarketChangePercent": 1.5,
+                        "regularMarketTime": 1700000000,
+                        "regularMarketVolume": 1000,
+                        "exchangeName": "NMS",
+                    },
+                    "timestamp": [1700000000 + i * 86400 for i in range(6)],
+                    "indicators": {"quote": [{"close": [10, 11, 12, 13, 14, 16], "volume": [1, 1, 1, 1, 1, 1]}]},
+                }
+            ]
+        }
+    }
+    stats = """
+    <table>
+      <tr><td>Market Cap</td><td title="100">100</td></tr>
+      <tr><td>Shares Outstanding</td><td title="10">10</td></tr>
+      <tr><td>Earnings Per Share (EPS)</td><td title="1.5">$1.50</td></tr>
+      <tr><td>Short % of Float</td><td title="22">22%</td></tr>
+    </table>
+    """
+    forecast = """
+    <table>
+      <tr><td>Target</td><td>Low</td><td>Average</td><td>Median</td><td>High</td></tr>
+      <tr><td>Price</td><td>$10</td><td>$30</td><td>$28</td><td>$40</td></tr>
+    </table>
+    """
+    pages = {
+        "https://query1.finance.yahoo.com/v8/finance/chart/EX?interval=1d&range=1y": __import__("json").dumps(yahoo),
+        "https://stockanalysis.com/stocks/ex/statistics/": stats,
+        "https://stockanalysis.com/stocks/ex/forecast/": forecast,
+    }
+
+    def getter(url: str) -> str:
+        if url not in pages:
+            raise RuntimeError(f"unexpected {url}")
+        return pages[url]
+
+    snapshot = fetch_new_snapshot("ex", getter)
+    assert snapshot["ticker"] == "EX"
+    assert snapshot["name"] == "Example Co"
+    assert snapshot["price"] == 20
+    assert snapshot["changePct"] == 1.5
+    assert snapshot["eps"] == 1.5
+    assert snapshot.get("forwardPE") is None
+    assert snapshot["target"] == 30
+    assert snapshot["shortFloatPct"] == 22
+    assert "borrowFee" not in snapshot
+    assert weekly_trend(snapshot) == (16 / 10 - 1) * 100
+    assert number_value("n/a") is None
+    assert parse_statistics_html(stats)["forwardPE"] is None
+    try:
+        parse_forecast_html("<table><tr><td>Other</td></tr></table>")
+    except RuntimeError:
+        pass
+    else:
+        raise AssertionError("forecast parser accepted a page with no target")
+    try:
+        fetch_new_snapshot("nope!", getter)
+    except QuoteError:
+        pass
+    else:
+        raise AssertionError("invalid ticker was accepted")
+
+
 def test_trading_edge_page_remains_the_default() -> None:
     source = (ROOT / "app.py").read_text(encoding="utf-8")
     assert 'st.title("Validated Trading Edge Dashboard")' in source
@@ -103,5 +201,7 @@ if __name__ == "__main__":
     test_seed_squeeze_counts()
     test_thesis_text_is_the_repo_playbook()
     test_valuation_sentence_uses_stored_numbers_only()
+    test_daily_and_weekly_trends_use_stored_series()
+    test_added_snapshot_uses_only_returned_fields()
     test_trading_edge_page_remains_the_default()
     print("Research desk snapshot checks passed.")
