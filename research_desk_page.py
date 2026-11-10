@@ -1,17 +1,21 @@
-"""Read-only Research Desk page for the Streamlit app.
+"""Research Desk page for the Streamlit app.
 
-Market figures come only from ``research-desk/lib/bootstrap.json``. Thesis
-paragraphs are the ticker playbooks already written in
-``research-desk/lib/research.ts``. Missing snapshot fields stay missing.
+Seeded market figures come from ``research-desk/lib/bootstrap.json``. A name
+added on the page is fetched from Yahoo Finance and Stock Analysis, and any
+field those pages do not publish stays blank. Thesis paragraphs are the ticker
+playbooks already written in ``research-desk/lib/research.ts``.
 """
 
 from __future__ import annotations
 
+import html
 import json
 from pathlib import Path
 
 import pandas as pd
 import streamlit as st
+
+from research_desk_quotes import QuoteError, fetch_new_snapshot, normalize_ticker
 
 BASE_DIR = Path(__file__).resolve().parent
 BOOTSTRAP_PATH = BASE_DIR / "research-desk" / "lib" / "bootstrap.json"
@@ -80,9 +84,35 @@ def upside(snapshot: dict) -> float | None:
     """Same gap as research-desk/lib/model.ts ``upside``."""
     price = snapshot.get("price")
     target = snapshot.get("target")
-    if isinstance(price, (int, float)) and isinstance(target, (int, float)) and price > 0:
+    if isinstance(price, (int, float)) and isinstance(target, (int, float)) and not isinstance(price, bool) and price > 0:
         return (target / price - 1) * 100
     return None
+
+
+def _series_return(closes: object, sessions_back: int) -> float | None:
+    if not isinstance(closes, list):
+        return None
+    values = [float(item) for item in closes if isinstance(item, (int, float)) and not isinstance(item, bool)]
+    if len(values) <= sessions_back:
+        return None
+    base = values[-1 - sessions_back]
+    last = values[-1]
+    if base <= 0:
+        return None
+    return (last / base - 1) * 100
+
+
+def daily_trend(snapshot: dict) -> float | None:
+    """Session change from the quote, or the last two stored closes when that is missing."""
+    change = snapshot.get("changePct")
+    if isinstance(change, (int, float)) and not isinstance(change, bool):
+        return float(change)
+    return _series_return(snapshot.get("closes"), 1)
+
+
+def weekly_trend(snapshot: dict) -> float | None:
+    """Latest stored close versus the close five trading sessions earlier."""
+    return _series_return(snapshot.get("closes"), 5)
 
 
 def squeeze_checks(snapshot: dict) -> list[dict]:
@@ -120,6 +150,18 @@ def _money(value: object, *, signed: bool = False) -> str | None:
     if signed and number > 0:
         return f"+{body}"
     return body
+
+
+def trend_text(value: object) -> str:
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        return "Not in snapshot"
+    if abs(float(value)) < 0.005:
+        direction = "Flat"
+    elif value > 0:
+        direction = "Up"
+    else:
+        direction = "Down"
+    return f"{direction} {_percent(value, 2, signed=True)}"
 
 
 def _percent(value: object, digits: int = 1, *, signed: bool = False) -> str | None:
@@ -164,7 +206,8 @@ def watchlist_rows(snapshots: list[dict] | None = None) -> list[dict]:
                 "ticker": snapshot.get("ticker"),
                 "name": snapshot.get("name"),
                 "price": snapshot.get("price") if isinstance(snapshot.get("price"), (int, float)) else None,
-                "change_pct": snapshot.get("changePct") if isinstance(snapshot.get("changePct"), (int, float)) else None,
+                "daily_trend": daily_trend(snapshot),
+                "weekly_trend": weekly_trend(snapshot),
                 "target": snapshot.get("target") if isinstance(snapshot.get("target"), (int, float)) else None,
                 "upside": gap,
                 "eps": snapshot.get("eps") if isinstance(snapshot.get("eps"), (int, float)) else None,
@@ -191,7 +234,8 @@ def display_watchlist(rows: list[dict]) -> pd.DataFrame:
                 "Ticker": row["ticker"],
                 "Company": row["name"],
                 "Price": _money(row["price"]) or "Not in snapshot",
-                "Day change": _percent(row["change_pct"], 2, signed=True) or "Not in snapshot",
+                "Daily trend": trend_text(row["daily_trend"]),
+                "Weekly trend": trend_text(row["weekly_trend"]),
                 "Analyst target": _money(row["target"]) or "Not in snapshot",
                 "Upside": _percent(row["upside"], 1, signed=True) or "Not in snapshot",
                 "EPS (TTM)": _money(row["eps"]) or "Not in snapshot",
@@ -237,35 +281,130 @@ def _source_notes(snapshot: dict) -> list[str]:
     return notes
 
 
+def _watchlist(snapshots: list[dict]) -> tuple[list[dict], dict[str, dict]]:
+    rows = watchlist_rows(snapshots)
+    by_ticker = {str(snapshot.get("ticker")): snapshot for snapshot in snapshots}
+    return rows, by_ticker
+
+
+def _requested_ticker() -> str | None:
+    value = st.query_params.get("ticker")
+    if isinstance(value, list):
+        value = value[0] if value else None
+    if not isinstance(value, str) or not value.strip():
+        return None
+    return value.strip().upper()
+
+
+def _plain_cell(value: object) -> str:
+    return html.escape(str(value).replace("\n", " "))
+
+
+def watchlist_html(rows: list[dict]) -> str:
+    """HTML table whose ticker and company are links to that stock."""
+    frame = display_watchlist(rows)
+    headers = "".join(f"<th>{html.escape(name)}</th>" for name in frame.columns)
+    body: list[str] = []
+    for record in frame.to_dict("records"):
+        ticker = html.escape(str(record["Ticker"]), quote=True)
+        href = f"?ticker={ticker}"
+        cells = []
+        for header, value in record.items():
+            text = _plain_cell(value)
+            if header in {"Ticker", "Company"}:
+                cells.append(f'<td><a href="{href}" target="_self">{text}</a></td>')
+            else:
+                cells.append(f"<td>{text}</td>")
+        body.append("<tr>" + "".join(cells) + "</tr>")
+    return (
+        "<table class=\"desk-watchlist\"><thead><tr>"
+        + headers
+        + "</tr></thead><tbody>"
+        + "".join(body)
+        + "</tbody></table>"
+    )
+
+
 def render_research_desk() -> None:
     st.title("Research Desk")
     st.caption(
-        "Seeded public snapshots from research-desk/lib/bootstrap.json (USAR, IBRX, ALMU, NVO, UUUU, SMR). "
-        "Price, analyst target, upside, EPS, forward P/E and short-squeeze inputs are shown only when that file stores them. "
-        "Thesis text is the ticker playbook in research-desk/lib/research.ts. "
-        "Notes and manual overrides stay in the hosted research-desk database and are not in this file. "
-        "Nothing on this page is a live quote."
+        "USAR, IBRX, ALMU, NVO, UUUU and SMR start from the seeded snapshots in research-desk/lib/bootstrap.json. "
+        "Add a ticker to fetch a quote from Yahoo Finance and valuation fields from Stock Analysis. "
+        "A figure stays blank when that source does not publish it. "
+        "Names you add stay in this browser session and are not written back to the repo. "
+        "Thesis text is the ticker playbook in research-desk/lib/research.ts."
     )
 
-    snapshots = load_snapshots()
+    if "desk_added" not in st.session_state:
+        st.session_state.desk_added = {}
+
+    with st.form("add_ticker", clear_on_submit=True):
+        entered = st.text_input("Add a ticker", placeholder="AAPL")
+        add = st.form_submit_button("Add to watchlist")
+    if add:
+        _add_ticker(entered)
+
+    snapshots = [*load_snapshots(), *st.session_state.desk_added.values()]
     if not snapshots:
         st.warning("No seeded snapshots were found in research-desk/lib/bootstrap.json.")
         return
 
-    rows = watchlist_rows(snapshots)
-    st.dataframe(display_watchlist(rows), use_container_width=True, hide_index=True)
+    rows, by_ticker = _watchlist(snapshots)
+    st.markdown(
+        """
+        <style>
+        table.desk-watchlist { width: 100%; border-collapse: collapse; font-size: 0.92rem; }
+        table.desk-watchlist th, table.desk-watchlist td {
+          text-align: left; padding: 0.45rem 0.4rem;
+          border-bottom: 1px solid rgba(128,128,128,0.28); vertical-align: top;
+        }
+        table.desk-watchlist a { font-weight: 650; }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+    st.markdown(watchlist_html(rows), unsafe_allow_html=True)
     st.caption(
-        "Upside is the stored average analyst target divided by the stored price, minus one. "
-        "The squeeze column counts how many of the five repo heuristics are met. Unknown inputs stay unknown and are not treated as zero. "
-        "A large target gap means at least 50% upside to that average target."
+        "Click a ticker or company in the table to open it. "
+        "Daily trend is the session change on the quote. "
+        "Weekly trend is the latest close in the saved series versus the close five trading sessions earlier. "
+        "Upside is the average analyst target divided by the price, minus one. "
+        "The squeeze column counts how many of the five repo heuristics are met. Unknown inputs stay unknown and are not treated as zero."
     )
 
-    by_ticker = {str(snapshot.get("ticker")): snapshot for snapshot in snapshots}
-    labels = [f"{row['ticker']} · {row['name']}" for row in rows]
-    choice = st.selectbox("Open a stock", labels, index=0)
-    ticker = choice.split(" · ", 1)[0]
-    snapshot = by_ticker[ticker]
+    ticker = _requested_ticker()
+    snapshot = by_ticker.get(str(ticker)) if ticker else None
+    if ticker and snapshot is None:
+        st.warning(f"{ticker} is not on the watchlist.")
+        return
+    if snapshot is None:
+        st.info("Click a stock in the table to open its thesis and short-squeeze checks.")
+        return
     _render_detail(snapshot)
+
+
+def _add_ticker(raw: str) -> None:
+    try:
+        ticker = normalize_ticker(raw)
+    except QuoteError as exc:
+        st.error(str(exc))
+        return
+    existing = {str(row.get("ticker")) for row in load_snapshots()} | set(st.session_state.desk_added)
+    if ticker in existing:
+        st.error(f"{ticker} is already on the watchlist.")
+        return
+    if len(existing) >= 100:
+        st.error("The watchlist already has 100 names.")
+        return
+    with st.spinner(f"Fetching {ticker}…"):
+        try:
+            snapshot = fetch_new_snapshot(ticker)
+        except QuoteError as exc:
+            st.error(str(exc))
+            return
+    st.session_state.desk_added[ticker] = snapshot
+    st.query_params["ticker"] = ticker
+    st.success(f"Added {ticker}. Blank fields were not published by the source.")
 
 
 def _render_detail(snapshot: dict) -> None:
@@ -273,7 +412,12 @@ def _render_detail(snapshot: dict) -> None:
     st.subheader(f"{ticker} · {snapshot.get('name') or 'Name not in snapshot'}")
     quote = _quote_label(snapshot)
     if quote:
-        st.caption(f"Stored regular-session quote: {quote}.")
+        kind = "Fetched" if snapshot.get("origin") == "fetched" else "Stored"
+        st.caption(f"{kind} regular-session quote: {quote}.")
+    st.caption(
+        f"Daily trend: {trend_text(daily_trend(snapshot))}. "
+        f"Weekly trend: {trend_text(weekly_trend(snapshot))}."
+    )
 
     gap = upside(snapshot)
     large_gap = gap is not None and gap >= 50
@@ -285,10 +429,12 @@ def _render_detail(snapshot: dict) -> None:
     price_delta = _percent(snapshot.get("changePct"), 2, signed=True)
     metrics[0].metric("Price", _money(snapshot.get("price")) or "—", delta=price_delta)
     target_help = None
-    if isinstance(snapshot.get("analystCount"), int):
+    analyst_count = snapshot.get("analystCount")
+    if isinstance(analyst_count, (int, float)) and not isinstance(analyst_count, bool):
+        shown_count = int(analyst_count) if float(analyst_count).is_integer() else analyst_count
         consensus = snapshot.get("consensus")
-        target_help = f"{snapshot['analystCount']} analysts"
-        if isinstance(consensus, str):
+        target_help = f"{shown_count} analysts"
+        if isinstance(consensus, str) and consensus:
             target_help += f" · {consensus}"
     metrics[1].metric("Analyst target", _money(snapshot.get("target")) or "—", help=target_help)
     metrics[2].metric("Upside", _percent(gap, 1, signed=True) or "—", help="Large target gap" if large_gap else "Below 50% versus the stored average target")
