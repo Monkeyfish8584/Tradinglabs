@@ -13,11 +13,14 @@ from datetime import date, timedelta
 from research_desk_page import (
     CLOSE_WINDOWS,
     DEFAULT_CLOSE_WINDOW,
+    MACRO_MARKETS,
     THESES,
     average_position,
     close_window,
     daily_trend,
+    load_macro_rows,
     load_quote_cache,
+    macro_trends_html,
     load_snapshots,
     rsi_14,
     save_quote_cache,
@@ -33,10 +36,12 @@ from research_desk_page import (
 from research_desk_quotes import (
     QuoteError,
     fetch_new_snapshot,
+    normalize_ticker,
     number_value,
     parse_forecast_html,
     parse_statistics_html,
     refresh_quote,
+    yahoo_chart_url,
 )
 
 
@@ -330,6 +335,53 @@ def test_refresh_quote_updates_price_and_keeps_fundamentals() -> None:
     assert load_quote_cache(cache) == {}
 
 
+def test_macro_trends_follow_the_desk_rules() -> None:
+    dates = ["2026-10-19", "2026-10-20", "2026-10-21", "2026-10-22", "2026-10-23", "2026-10-26", "2026-10-27", "2026-10-28", "2026-10-29", "2026-10-30"]
+    closes = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+    stamps = [int(__import__("datetime").datetime.fromisoformat(day).replace(tzinfo=__import__("datetime").timezone.utc).timestamp()) for day in dates]
+    body = __import__("json").dumps(
+        {
+            "chart": {
+                "result": [
+                    {
+                        "meta": {"regularMarketPrice": 10, "shortName": "Macro"},
+                        "timestamp": stamps,
+                        "indicators": {"quote": [{"close": closes}]},
+                    }
+                ]
+            }
+        }
+    )
+    expected = {yahoo_chart_url(symbol, "6mo"): body for _, symbol in MACRO_MARKETS}
+    failed = yahoo_chart_url("^GDAXI", "6mo")
+
+    def getter(url: str) -> str:
+        if url == failed:
+            raise RuntimeError("Ticker not found or quote unavailable")
+        if url not in expected:
+            raise RuntimeError(f"unexpected {url}")
+        return expected[url]
+
+    rows = load_macro_rows(getter)
+    assert [row["label"] for row in rows] == ["BTCUSD", "US500", "US100", "US30", "ETHUSD", "UK100", "GER30"]
+    assert normalize_ticker("^GSPC") == "^GSPC"
+    for row in rows:
+        if row["label"] == "GER30":
+            assert row["available"] is False
+            assert row["daily"] is None and row["weekly"] is None
+        else:
+            assert row["available"] is True
+            assert row["daily"] == "Up"
+            assert row["weekly"] == "Up"
+    html = macro_trends_html(rows)
+    assert "BTCUSD" in html and "GER30" in html
+    assert ">Daily <" in html and ">Weekly <" in html
+    assert "Unavailable" in html
+    assert "RSI" not in html and "200-day" not in html and "$" not in html
+    source = (ROOT / "app.py").read_text(encoding="utf-8")
+    assert source.index("render_macro_trends()") < source.index("st.navigation(")
+
+
 def test_trading_edge_page_remains_the_default() -> None:
     source = (ROOT / "app.py").read_text(encoding="utf-8")
     assert 'st.title("Validated Trading Edge Dashboard")' in source
@@ -349,5 +401,6 @@ if __name__ == "__main__":
     test_daily_and_weekly_trends_use_stored_series()
     test_added_snapshot_uses_only_returned_fields()
     test_refresh_quote_updates_price_and_keeps_fundamentals()
+    test_macro_trends_follow_the_desk_rules()
     test_trading_edge_page_remains_the_default()
     print("Research desk snapshot checks passed.")

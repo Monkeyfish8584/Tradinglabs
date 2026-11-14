@@ -17,7 +17,18 @@ from pathlib import Path
 import pandas as pd
 import streamlit as st
 
-from research_desk_quotes import QuoteError, fetch_new_snapshot, normalize_ticker, refresh_quote
+from research_desk_quotes import QuoteError, fetch_new_snapshot, fetch_trend_snapshot, normalize_ticker, refresh_quote
+
+# Display name, then the Yahoo symbol. GER30 is the DAX index Yahoo publishes as ^GDAXI.
+MACRO_MARKETS: tuple[tuple[str, str], ...] = (
+    ("BTCUSD", "BTC-USD"),
+    ("US500", "^GSPC"),
+    ("US100", "^NDX"),
+    ("US30", "^DJI"),
+    ("ETHUSD", "ETH-USD"),
+    ("UK100", "^FTSE"),
+    ("GER30", "^GDAXI"),
+)
 
 CLOSE_WINDOWS = (30, 60, 90)
 DEFAULT_CLOSE_WINDOW = 60
@@ -275,6 +286,89 @@ def trend_text(value: object) -> str:
     if value in {"Up", "Down", "Flat"}:
         return str(value)
     return "Not enough closes"
+
+
+def load_macro_rows(getter=None) -> list[dict]:
+    """Daily and weekly trend for the macro markets. A failed feed stays blank."""
+    rows: list[dict] = []
+    for label, symbol in MACRO_MARKETS:
+        try:
+            snapshot = fetch_trend_snapshot(symbol, getter, span="6mo")
+        except QuoteError:
+            rows.append({"label": label, "daily": None, "weekly": None, "available": False})
+            continue
+        rows.append(
+            {
+                "label": label,
+                "daily": daily_trend(snapshot),
+                "weekly": weekly_trend(snapshot),
+                "available": True,
+            }
+        )
+    return rows
+
+
+def _trend_class(value: object) -> str:
+    if value == "Up":
+        return "macro-up"
+    if value == "Down":
+        return "macro-down"
+    if value == "Flat":
+        return "macro-flat"
+    return "macro-missing"
+
+
+def macro_trends_html(rows: list[dict]) -> str:
+    cards: list[str] = []
+    for row in rows:
+        daily = trend_text(row.get("daily")) if row.get("available") else "Unavailable"
+        weekly = trend_text(row.get("weekly")) if row.get("available") else "Unavailable"
+        cards.append(
+            "<div class=\"macro-card\">"
+            f"<div class=\"macro-name\">{html.escape(str(row.get('label') or ''))}</div>"
+            f"<div>Daily <span class=\"{_trend_class(row.get('daily') if row.get('available') else None)}\">{html.escape(daily)}</span></div>"
+            f"<div>Weekly <span class=\"{_trend_class(row.get('weekly') if row.get('available') else None)}\">{html.escape(weekly)}</span></div>"
+            "</div>"
+        )
+    return "<div class=\"macro-strip\">" + "".join(cards) + "</div>"
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def cached_macro_rows() -> list[dict]:
+    return load_macro_rows()
+
+
+def render_macro_trends() -> None:
+    """Daily and weekly trend for the macro markets, shown above either page."""
+    st.markdown("**Macro trends**")
+    with st.spinner("Loading macro trends…"):
+        try:
+            rows = cached_macro_rows()
+        except Exception:
+            st.caption("Macro trends could not be loaded.")
+            return
+    st.markdown(
+        """
+        <style>
+        .macro-strip { display: flex; gap: 0.55rem; flex-wrap: wrap; }
+        .macro-card {
+          flex: 1 1 7.5rem; border: 1px solid rgba(128,128,128,0.35);
+          border-radius: 8px; padding: 0.4rem 0.6rem; line-height: 1.35;
+        }
+        .macro-name { font-weight: 700; }
+        .macro-up { color: #1b7f4a; font-weight: 700; }
+        .macro-down { color: #b42318; font-weight: 700; }
+        .macro-flat, .macro-missing { font-weight: 700; }
+        </style>
+        """
+        + macro_trends_html(rows),
+        unsafe_allow_html=True,
+    )
+    st.caption(
+        "Daily and weekly trend only. "
+        "Daily is Up when the latest close is higher than each of the previous three daily closes, and Down when it is lower than each of them. Otherwise it is Flat. "
+        "Weekly is this week's close against the previous week's close."
+    )
 
 
 def rsi_text(snapshot: dict) -> str:
