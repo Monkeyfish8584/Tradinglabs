@@ -10,14 +10,25 @@ from __future__ import annotations
 
 import html
 import json
+import re
 import tempfile
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 import pandas as pd
 import streamlit as st
 
-from research_desk_quotes import QuoteError, fetch_new_snapshot, fetch_trend_snapshot, normalize_ticker, refresh_quote
+from research_desk_quotes import (
+    QuoteError,
+    fetch_new_snapshot,
+    fetch_text,
+    fetch_trend_snapshot,
+    normalize_ticker,
+    refresh_quote,
+    table_rows,
+    yahoo_chart_url,
+)
 
 # Display name, then the Yahoo symbol. GER30 is the DAX index Yahoo publishes as ^GDAXI.
 MACRO_MARKETS: tuple[tuple[str, str], ...] = (
@@ -32,6 +43,15 @@ MACRO_MARKETS: tuple[tuple[str, str], ...] = (
 
 CLOSE_WINDOWS = (30, 60, 90)
 DEFAULT_CLOSE_WINDOW = 60
+# Index constituents published on Wikipedia. GER30 uses the current DAX membership.
+BREADTH_SOURCES: dict[str, dict[str, str]] = {
+    "US500": {"url": "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies", "venue": "us500"},
+    "US100": {"url": "https://en.wikipedia.org/wiki/List_of_NASDAQ-100_companies", "venue": "us100"},
+    "US30": {"url": "https://en.wikipedia.org/wiki/List_of_Dow_Jones_Industrial_Average_companies", "venue": "us30"},
+    "UK100": {"url": "https://en.wikipedia.org/wiki/FTSE_100_Index", "venue": "uk100"},
+    "GER30": {"url": "https://en.wikipedia.org/wiki/DAX", "venue": "ger30"},
+}
+_NO_BREADTH = {"BTCUSD", "ETHUSD"}
 
 BASE_DIR = Path(__file__).resolve().parent
 BOOTSTRAP_PATH = BASE_DIR / "research-desk" / "lib" / "bootstrap.json"
@@ -318,14 +338,20 @@ def _trend_class(value: object) -> str:
     return "macro-missing"
 
 
-def macro_trends_html(rows: list[dict]) -> str:
+def macro_trends_html(rows: list[dict], selected: str | None = None) -> str:
     cards: list[str] = []
     for row in rows:
+        label = str(row.get("label") or "")
         daily = trend_text(row.get("daily")) if row.get("available") else "Unavailable"
         weekly = trend_text(row.get("weekly")) if row.get("available") else "Unavailable"
+        name = html.escape(label)
+        if label in BREADTH_SOURCES:
+            href = html.escape(f"?breadth={label}", quote=True)
+            name = f'<a href="{href}" target="_self">{name}</a>'
+        selected_class = " macro-selected" if label == selected else ""
         cards.append(
-            "<div class=\"macro-card\">"
-            f"<div class=\"macro-name\">{html.escape(str(row.get('label') or ''))}</div>"
+            f"<div class=\"macro-card{selected_class}\">"
+            f"<div class=\"macro-name\">{name}</div>"
             f"<div>Daily <span class=\"{_trend_class(row.get('daily') if row.get('available') else None)}\">{html.escape(daily)}</span></div>"
             f"<div>Weekly <span class=\"{_trend_class(row.get('weekly') if row.get('available') else None)}\">{html.escape(weekly)}</span></div>"
             "</div>"
@@ -333,9 +359,186 @@ def macro_trends_html(rows: list[dict]) -> str:
     return "<div class=\"macro-strip\">" + "".join(cards) + "</div>"
 
 
+def _ticker_cell(text: str, pattern: str) -> str | None:
+    cleaned = text.strip().upper()
+    if re.fullmatch(pattern, cleaned):
+        return cleaned
+    return None
+
+
+def constituent_symbols(html_body: str, label: str) -> list[str]:
+    """Yahoo symbols for one index. An unreadable table returns an empty list."""
+    rows = table_rows(html_body)
+    found: list[str] = []
+    if label == "US500":
+        start = next((i for i, row in enumerate(rows) if row and row[0]["text"].strip() == "Symbol"), None)
+        column, pattern, venue = 0, r"[A-Z]{1,5}(?:\.[A-Z])?", "us"
+    elif label == "US100":
+        start = next((i for i, row in enumerate(rows) if row and row[0]["text"].strip() == "Ticker"), None)
+        column, pattern, venue = 0, r"[A-Z]{1,5}(?:\.[A-Z])?", "us"
+    elif label == "US30":
+        start = next((i for i, row in enumerate(rows) if len(row) > 2 and row[2]["text"].strip() == "Symbol"), None)
+        column, pattern, venue = 2, r"[A-Z]{1,5}(?:\.[A-Z])?", "us"
+    elif label == "UK100":
+        start = next((i for i, row in enumerate(rows) if len(row) > 1 and row[0]["text"].strip() == "Company" and row[1]["text"].strip().startswith("Ticker")), None)
+        column, pattern, venue = 1, r"[A-Z0-9]{2,6}(?:\.[A-Z])?", "uk"
+    elif label == "GER30":
+        start = next((i for i, row in enumerate(rows) if row and row[0]["text"].strip() == "Ticker"), None)
+        column, pattern, venue = 0, r"[A-Z0-9]{1,6}\.[A-Z]{1,3}", "de"
+    else:
+        return []
+    if start is None:
+        return []
+    for row in rows[start + 1 :]:
+        if len(row) <= column:
+            break
+        symbol = _ticker_cell(row[column]["text"], pattern)
+        if symbol is None:
+            break
+        if venue == "us":
+            symbol = symbol.replace(".", "-")
+        elif venue == "uk":
+            symbol = f"{symbol.replace('.', '-')}.L"
+        found.append(symbol)
+    unique: list[str] = []
+    seen: set[str] = set()
+    for symbol in found:
+        if symbol not in seen:
+            seen.add(symbol)
+            unique.append(symbol)
+    return unique
+
+
+def parse_session_extremes(body: str) -> dict | None:
+    """Latest session high and low, plus the 52-week high and low, from a Yahoo chart."""
+    try:
+        payload = json.loads(body)
+    except json.JSONDecodeError:
+        return None
+    result = (payload.get("chart") or {}).get("result") or []
+    if not result:
+        return None
+    meta = result[0].get("meta") or {}
+
+    def number(key: str) -> float | None:
+        value = meta.get(key)
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return None
+        return float(value)
+
+    extremes = {
+        "day_high": number("regularMarketDayHigh"),
+        "day_low": number("regularMarketDayLow"),
+        "high_52": number("fiftyTwoWeekHigh"),
+        "low_52": number("fiftyTwoWeekLow"),
+    }
+    if any(value is None for value in extremes.values()):
+        return None
+    return extremes
+
+
+def _at_high(day_high: float, high_52: float) -> bool:
+    return high_52 > 0 and day_high >= high_52 * (1 - 1e-4)
+
+
+def _at_low(day_low: float, low_52: float) -> bool:
+    return low_52 > 0 and day_low <= low_52 * (1 + 1e-4)
+
+
+def breadth_summary(label: str, symbols: list[str], extremes: list[dict | None]) -> dict:
+    """Percent of constituents at a 52-week high or low. Missing quotes stay out of both shares."""
+    highs = lows = measured = unknown = 0
+    for item in extremes:
+        if not item:
+            unknown += 1
+            continue
+        measured += 1
+        if _at_high(item["day_high"], item["high_52"]):
+            highs += 1
+        if _at_low(item["day_low"], item["low_52"]):
+            lows += 1
+    attempted = measured + unknown
+    ready = bool(symbols) and measured > 0 and measured * 2 >= attempted
+    high_pct = None if not ready else highs / measured * 100
+    low_pct = None if not ready else lows / measured * 100
+    return {
+        "label": label,
+        "listed": len(symbols),
+        "measured": measured,
+        "unknown": unknown,
+        "highs": highs,
+        "lows": lows,
+        "high_pct": high_pct,
+        "low_pct": low_pct,
+        "ready": ready,
+    }
+
+
+def load_breadth(label: str, getter=None) -> dict:
+    """Constituent 52-week highs and lows for one index. Crypto has no constituent list."""
+    if label in _NO_BREADTH:
+        return {"label": label, "applies": False, "ready": False}
+    source = BREADTH_SOURCES.get(label)
+    if source is None:
+        return {"label": label, "applies": False, "ready": False}
+    get = getter or fetch_text
+    try:
+        page = get(source["url"])
+    except Exception:
+        return {"label": label, "applies": True, "ready": False, "listed": 0}
+    symbols = constituent_symbols(page, label)
+
+    def one(symbol: str) -> dict | None:
+        try:
+            body = get(yahoo_chart_url(symbol, "5d"))
+        except Exception:
+            return None
+        return parse_session_extremes(body)
+
+    if getter is None and len(symbols) > 1:
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            extremes = list(pool.map(one, symbols))
+    else:
+        extremes = [one(symbol) for symbol in symbols]
+    summary = breadth_summary(label, symbols, extremes)
+    summary["applies"] = True
+    return summary
+
+
+def breadth_text(summary: dict) -> str:
+    label = summary.get("label") or "This index"
+    if summary.get("applies") is False:
+        return f"Underlying highs and lows do not apply to {label}."
+    if not summary.get("ready"):
+        return f"{label} did not publish enough constituent quotes to calculate a high or low percentage."
+    unknown = int(summary.get("unknown") or 0)
+    text = (
+        f"{summary['high_pct']:.1f}% of {summary['measured']} constituents made a 52-week high in the latest session "
+        f"({summary['highs']} names). "
+        f"{summary['low_pct']:.1f}% made a 52-week low ({summary['lows']} names)."
+    )
+    if unknown:
+        text += f" {unknown} constituents had no published session range, so they are left out of both percentages."
+    return text
+
+
 @st.cache_data(ttl=900, show_spinner=False)
 def cached_macro_rows() -> list[dict]:
     return load_macro_rows()
+
+
+def _requested_breadth() -> str | None:
+    value = st.query_params.get("breadth")
+    if isinstance(value, list):
+        value = value[0] if value else None
+    if not isinstance(value, str) or not value.strip():
+        return None
+    return value.strip().upper()
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def cached_breadth(label: str) -> dict:
+    return load_breadth(label)
 
 
 def render_macro_trends() -> None:
@@ -347,6 +550,7 @@ def render_macro_trends() -> None:
         except Exception:
             st.caption("Macro trends could not be loaded.")
             return
+    selected = _requested_breadth()
     st.markdown(
         """
         <style>
@@ -355,20 +559,46 @@ def render_macro_trends() -> None:
           flex: 1 1 7.5rem; border: 1px solid rgba(128,128,128,0.35);
           border-radius: 8px; padding: 0.4rem 0.6rem; line-height: 1.35;
         }
+        .macro-selected { outline: 2px solid rgba(27,127,74,0.85); }
         .macro-name { font-weight: 700; }
+        .macro-name a { color: inherit; }
         .macro-up { color: #1b7f4a; font-weight: 700; }
         .macro-down { color: #b42318; font-weight: 700; }
         .macro-flat, .macro-missing { font-weight: 700; }
         </style>
         """
-        + macro_trends_html(rows),
+        + macro_trends_html(rows, selected),
         unsafe_allow_html=True,
     )
     st.caption(
         "Daily and weekly trend only. "
         "Daily is Up when the latest close is higher than each of the previous three daily closes, and Down when it is lower than each of them. Otherwise it is Flat. "
-        "Weekly is this week's close against the previous week's close."
+        "Weekly is this week's close against the previous week's close. "
+        "Click an index for the share of its constituents at a 52-week high or low. This does not apply to BTCUSD or ETHUSD."
     )
+    if selected:
+        _render_breadth(selected)
+
+
+def _render_breadth(label: str) -> None:
+    if label in _NO_BREADTH:
+        st.info(f"Underlying highs and lows do not apply to {label}.")
+        return
+    if label not in BREADTH_SOURCES:
+        return
+    with st.spinner(f"Checking {label} constituents…"):
+        try:
+            summary = cached_breadth(label)
+        except Exception:
+            st.warning(f"{label} constituent strength could not be loaded.")
+            return
+    st.markdown(f"**{label} underlying strength**")
+    st.write(breadth_text(summary))
+    if summary.get("ready"):
+        st.caption(
+            "A constituent counts as a new high when its latest session high is at the 52-week high, "
+            "and as a new low when its latest session low is at the 52-week low."
+        )
 
 
 def rsi_text(snapshot: dict) -> str:
