@@ -13,11 +13,19 @@ from datetime import date, timedelta
 from research_desk_page import (
     CLOSE_WINDOWS,
     DEFAULT_CLOSE_WINDOW,
+    BREADTH_SOURCES,
+    MACRO_MARKETS,
     THESES,
     average_position,
     close_window,
     daily_trend,
+    breadth_summary,
+    breadth_text,
+    constituent_symbols,
+    load_breadth,
+    load_macro_rows,
     load_quote_cache,
+    macro_trends_html,
     load_snapshots,
     rsi_14,
     save_quote_cache,
@@ -33,10 +41,12 @@ from research_desk_page import (
 from research_desk_quotes import (
     QuoteError,
     fetch_new_snapshot,
+    normalize_ticker,
     number_value,
     parse_forecast_html,
     parse_statistics_html,
     refresh_quote,
+    yahoo_chart_url,
 )
 
 
@@ -330,6 +340,138 @@ def test_refresh_quote_updates_price_and_keeps_fundamentals() -> None:
     assert load_quote_cache(cache) == {}
 
 
+def test_macro_trends_follow_the_desk_rules() -> None:
+    dates = ["2026-10-19", "2026-10-20", "2026-10-21", "2026-10-22", "2026-10-23", "2026-10-26", "2026-10-27", "2026-10-28", "2026-10-29", "2026-10-30"]
+    closes = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+    stamps = [int(__import__("datetime").datetime.fromisoformat(day).replace(tzinfo=__import__("datetime").timezone.utc).timestamp()) for day in dates]
+    body = __import__("json").dumps(
+        {
+            "chart": {
+                "result": [
+                    {
+                        "meta": {"regularMarketPrice": 10, "shortName": "Macro"},
+                        "timestamp": stamps,
+                        "indicators": {"quote": [{"close": closes}]},
+                    }
+                ]
+            }
+        }
+    )
+    expected = {yahoo_chart_url(symbol, "6mo"): body for _, symbol in MACRO_MARKETS}
+    failed = yahoo_chart_url("^GDAXI", "6mo")
+
+    def getter(url: str) -> str:
+        if url == failed:
+            raise RuntimeError("Ticker not found or quote unavailable")
+        if url not in expected:
+            raise RuntimeError(f"unexpected {url}")
+        return expected[url]
+
+    rows = load_macro_rows(getter)
+    assert [row["label"] for row in rows] == ["BTCUSD", "US500", "US100", "US30", "ETHUSD", "UK100", "GER30"]
+    assert normalize_ticker("^GSPC") == "^GSPC"
+    for row in rows:
+        if row["label"] == "GER30":
+            assert row["available"] is False
+            assert row["daily"] is None and row["weekly"] is None
+        else:
+            assert row["available"] is True
+            assert row["daily"] == "Up"
+            assert row["weekly"] == "Up"
+    html = macro_trends_html(rows)
+    assert "BTCUSD" in html and "GER30" in html
+    assert ">Daily <" in html and ">Weekly <" in html
+    assert "Unavailable" in html
+    assert "RSI" not in html and "200-day" not in html and "$" not in html
+    assert 'href="?breadth=US500"' in html
+    assert 'href="?breadth=UK100"' in html
+    assert 'href="?breadth=BTCUSD"' not in html
+    assert 'href="?breadth=ETHUSD"' not in html
+    source = (ROOT / "app.py").read_text(encoding="utf-8")
+    assert source.index("render_macro_trends()") < source.index("st.navigation(")
+
+
+def test_breadth_uses_published_highs_and_lows_only() -> None:
+    table = """
+    <table>
+      <tr><td>Company</td><td>Exchange</td><td>Symbol</td></tr>
+      <tr><td>Apple</td><td>NASDAQ</td><td>AAPL</td></tr>
+      <tr><td>Microsoft</td><td>NASDAQ</td><td>MSFT</td></tr>
+      <tr><td>Coca-Cola</td><td>NYSE</td><td>KO</td></tr>
+      <tr><td>IBM</td><td>NYSE</td><td>IBM</td></tr>
+      <tr><td>Date added</td><td>NYSE</td><td>Date added</td></tr>
+    </table>
+    """
+    symbols = constituent_symbols(table, "US30")
+    assert symbols == ["AAPL", "MSFT", "KO", "IBM"]
+    assert constituent_symbols(
+        "<table><tr><td>Company</td><td>Exchange</td><td>Symbol</td></tr><tr><td>Berkshire</td><td>NYSE</td><td>BRK.B</td></tr></table>",
+        "US30",
+    ) == ["BRK-B"]
+    uk = constituent_symbols(
+        "<table><tr><td>Company</td><td>Ticker</td></tr><tr><td>3i</td><td>III</td></tr></table>",
+        "UK100",
+    )
+    assert uk == ["III.L"]
+    assert constituent_symbols(
+        "<table><tr><td>Company</td><td>Ticker</td></tr><tr><td>BT Group</td><td>BT.A</td></tr></table>",
+        "UK100",
+    ) == ["BT-A.L"]
+    german = constituent_symbols(
+        "<table><tr><td>Ticker</td><td>Company</td></tr><tr><td>ADS.DE</td><td>Adidas</td></tr><tr><td>AIR.PA</td><td>Airbus</td></tr></table>",
+        "GER30",
+    )
+    assert german == ["ADS.DE", "AIR.PA"]
+
+    def chart(day_high, day_low, high_52, low_52) -> str:
+        return __import__("json").dumps(
+            {
+                "chart": {
+                    "result": [
+                        {
+                            "meta": {
+                                "regularMarketDayHigh": day_high,
+                                "regularMarketDayLow": day_low,
+                                "fiftyTwoWeekHigh": high_52,
+                                "fiftyTwoWeekLow": low_52,
+                            }
+                        }
+                    ]
+                }
+            }
+        )
+
+    quotes = {
+        yahoo_chart_url("AAPL", "5d"): chart(10, 9, 10, 5),
+        yahoo_chart_url("MSFT", "5d"): chart(8, 5, 12, 5),
+        yahoo_chart_url("KO", "5d"): chart(8, 6, 12, 4),
+    }
+
+    def getter(url: str) -> str:
+        if url == BREADTH_SOURCES["US30"]["url"]:
+            return table
+        if url not in quotes:
+            raise RuntimeError("missing quote")
+        return quotes[url]
+
+    summary = load_breadth("US30", getter)
+    assert summary["ready"] is True
+    assert summary["measured"] == 3
+    assert summary["unknown"] == 1
+    assert summary["highs"] == 1
+    assert summary["lows"] == 1
+    assert summary["high_pct"] == (1 / 3) * 100
+    text = breadth_text(summary)
+    assert "33.3%" in text
+    assert "52-week high" in text and "52-week low" in text
+    assert "left out" in text
+    crypto = breadth_text(load_breadth("BTCUSD", getter))
+    assert crypto == "Underlying highs and lows do not apply to BTCUSD."
+    neither = breadth_summary("US30", ["AAA"], [None])
+    assert neither["ready"] is False
+    assert "percentage" in breadth_text({**neither, "applies": True})
+
+
 def test_trading_edge_page_remains_the_default() -> None:
     source = (ROOT / "app.py").read_text(encoding="utf-8")
     assert 'st.title("Validated Trading Edge Dashboard")' in source
@@ -349,5 +491,7 @@ if __name__ == "__main__":
     test_daily_and_weekly_trends_use_stored_series()
     test_added_snapshot_uses_only_returned_fields()
     test_refresh_quote_updates_price_and_keeps_fundamentals()
+    test_macro_trends_follow_the_desk_rules()
+    test_breadth_uses_published_highs_and_lows_only()
     test_trading_edge_page_remains_the_default()
     print("Research desk snapshot checks passed.")

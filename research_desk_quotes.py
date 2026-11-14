@@ -17,7 +17,7 @@ import urllib.request
 from datetime import datetime, timezone
 
 UA = "Mozilla/5.0 (compatible; ResearchDesk/1.0)"
-TICKER_RE = re.compile(r"^[A-Z0-9][A-Z0-9.^=-]{0,14}$")
+TICKER_RE = re.compile(r"^[A-Z0-9^][A-Z0-9.^=-]{0,14}$")
 _SUFFIX = {"T": 1e12, "B": 1e9, "M": 1e6, "K": 1e3}
 _MARKETS = {"DE": "etr", "MC": "bme", "PA": "epa"}
 
@@ -252,8 +252,24 @@ def _apply_source(snapshot: dict, key: str, name: str, url: str, parser, getter)
     snapshot["sources"][key] = {"name": name, "url": url, "fetchedAt": now}
 
 
-def yahoo_chart_url(ticker: str) -> str:
-    return f"https://query1.finance.yahoo.com/v8/finance/chart/{urllib.parse.quote(ticker)}?interval=1d&range=2y"
+def yahoo_chart_url(ticker: str, span: str = "2y") -> str:
+    return f"https://query1.finance.yahoo.com/v8/finance/chart/{urllib.parse.quote(ticker)}?interval=1d&range={span}"
+
+
+def fetch_trend_snapshot(raw: str, getter=None, span: str = "6mo") -> dict:
+    """Daily closes for one symbol. Raises QuoteError when Yahoo does not return a price."""
+    ticker = normalize_ticker(raw)
+    get = getter or fetch_text
+    quote_url = yahoo_chart_url(ticker, span)
+    try:
+        parsed = parse_yahoo_chart(get(quote_url), ticker)
+    except Exception as exc:
+        message = str(exc).strip()
+        if message.startswith("Provider") or message.startswith("Feed"):
+            raise QuoteError(f"{ticker}: {message}") from exc
+        raise QuoteError(f"{ticker} did not return a price from Yahoo Finance.") from exc
+    parsed["ticker"] = ticker
+    return parsed
 
 
 def refresh_quote(snapshot: dict, getter=None) -> dict:
