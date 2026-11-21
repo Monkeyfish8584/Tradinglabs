@@ -761,7 +761,7 @@ def watchlist_html(rows: list[dict]) -> str:
         for header, value in record.items():
             text = _plain_cell(value)
             if header in {"Ticker", "Company"}:
-                cells.append(f'<td><a href="{href}" target="_self">{text}</a></td>')
+                cells.append(f'<td><a href="{href}" target="_blank" rel="noopener">{text}</a></td>')
             else:
                 cells.append(f"<td>{text}</td>")
         body.append("<tr>" + "".join(cells) + "</tr>")
@@ -775,6 +775,15 @@ def watchlist_html(rows: list[dict]) -> str:
 
 
 def render_research_desk() -> None:
+    _hydrate_quotes()
+    ticker = _requested_ticker()
+    if ticker:
+        _render_stock_page(ticker)
+        return
+    _render_watchlist()
+
+
+def _render_watchlist() -> None:
     st.title("Research Desk")
     st.caption(
         "USAR, IBRX, ALMU, NVO, UUUU and SMR start from the seeded snapshots in research-desk/lib/bootstrap.json. "
@@ -784,8 +793,6 @@ def render_research_desk() -> None:
         "They are not written back to the repo. "
         "Thesis text is the ticker playbook in research-desk/lib/research.ts."
     )
-
-    _hydrate_quotes()
 
     with st.form("add_ticker", clear_on_submit=True):
         entered = st.text_input("Add a ticker", placeholder="AAPL")
@@ -807,7 +814,7 @@ def render_research_desk() -> None:
     for message in st.session_state.get("desk_refresh_errors") or []:
         st.error(message)
 
-    rows, by_ticker = _watchlist(snapshots)
+    rows = _watchlist(snapshots)[0]
     st.markdown(
         """
         <style>
@@ -823,7 +830,7 @@ def render_research_desk() -> None:
     )
     st.markdown(watchlist_html(rows), unsafe_allow_html=True)
     st.caption(
-        "Click a ticker or company in the table to open it. "
+        "Click a ticker or company to open that stock on its own page. "
         "Daily trend is Up when the latest close is higher than each of the previous three daily closes, and Down when it is lower than each of them. Otherwise it is Flat. "
         "Weekly trend compares this week's close with the previous week's close: Up when it is higher, Down when it is lower, and Flat when they are equal. "
         "RSI (14) and the 200-day moving average are daily readings, shown on the daily view and the weekly view. "
@@ -831,16 +838,7 @@ def render_research_desk() -> None:
         "Upside is the average analyst target divided by the price, minus one. "
         "The squeeze column counts how many of the five repo heuristics are met. Unknown inputs stay unknown and are not treated as zero."
     )
-
-    ticker = _requested_ticker()
-    snapshot = by_ticker.get(str(ticker)) if ticker else None
-    if ticker and snapshot is None:
-        st.warning(f"{ticker} is not on the watchlist.")
-        return
-    if snapshot is None:
-        st.info("Click a stock in the table to open its thesis and short-squeeze checks.")
-        return
-    _render_detail(snapshot)
+    st.info("Click a stock in the table to open its thesis and short-squeeze checks on a new page.")
 
 
 def _remember_quotes() -> None:
@@ -925,7 +923,6 @@ def _add_ticker(raw: str) -> None:
             return
     st.session_state.desk_added[ticker] = snapshot
     _remember_quotes()
-    st.query_params["ticker"] = ticker
     st.success(f"Added {ticker}. Blank fields were not published by the source.")
 
 
@@ -958,9 +955,22 @@ def _render_closes(snapshot: dict) -> None:
     st.caption("Close dates are not stored, so the 30, 60 and 90 day choices cannot be applied.")
 
 
+def _render_stock_page(ticker: str) -> None:
+    """The stock on its own, without the watchlist."""
+    st.markdown(
+        '<p><a href="/research-desk" target="_self">Back to the watchlist</a></p>',
+        unsafe_allow_html=True,
+    )
+    snapshot = next((row for row in _current_snapshots() if str(row.get("ticker")) == ticker), None)
+    if snapshot is None:
+        st.warning(f"{ticker} is not on the watchlist.")
+        return
+    _render_detail(snapshot)
+
+
 def _render_detail(snapshot: dict) -> None:
     ticker = str(snapshot.get("ticker"))
-    st.subheader(f"{ticker} · {snapshot.get('name') or 'Name not in snapshot'}")
+    st.title(f"{ticker} · {snapshot.get('name') or 'Name not in snapshot'}")
 
     gap = upside(snapshot)
     large_gap = gap is not None and gap >= 50

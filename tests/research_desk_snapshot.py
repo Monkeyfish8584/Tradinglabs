@@ -194,6 +194,11 @@ def test_daily_and_weekly_trends_use_stored_series() -> None:
     table = watchlist_html(watchlist_rows())
     assert 'href="?ticker=USAR"' in table
     assert 'href="?ticker=NVO"' in table
+    assert 'target="_blank"' in table
+    assert 'rel="noopener"' in table
+    assert 'target="_self"' not in table
+    assert "Back to the watchlist" in page
+    assert "on its own page" in page
     assert "Daily trend" in table and "Weekly trend" in table
     assert "Daily RSI (14)" in table and "Weekly RSI (14)" in table
     assert "Daily 200-day average" in table and "Weekly 200-day average" in table
