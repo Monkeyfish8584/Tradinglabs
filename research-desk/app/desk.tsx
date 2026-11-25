@@ -20,13 +20,15 @@ function stamp(s?: string, full = false) {
 }
 function Icon({children}: {children: ReactNode}) {return <span className="icon-wrap">{children}</span>}
 function Mark({ticker,small=false}: {ticker:string;small?:boolean}) {
-  const palette:Record<string,string> = {USAR:"sand", IBRX:"aqua", ALMU:"violet", NVO:"blue", UUUU:"mint", SMR:"rose"};
-  const bundled=["USAR","IBRX","ALMU","NVO","UUUU","SMR"].includes(ticker);
+  // Generic logo for any ticker: the same stockanalysis pattern for all,
+  // with a deterministic colour derived from the ticker for the monogram fallback.
+  const palette=["sand","aqua","violet","blue","mint","rose"];
+  const colour=palette[[...ticker].reduce((h,c)=>h*31+c.charCodeAt(0),0)%palette.length];
   const symbol=encodeURIComponent(ticker.toLowerCase());
-  const candidates=[...(bundled?[`/logos/${symbol}.svg`]:[]),`https://logos.stockanalysis.com/${symbol}.svg`,`https://logos.stockanalysis.com/${symbol}.png`];
+  const candidates=[`https://logos.stockanalysis.com/${symbol}.svg`,`https://logos.stockanalysis.com/${symbol}.png`];
   const [attempt,setAttempt]=useState(0),[loaded,setLoaded]=useState(false);
   useEffect(()=>{setAttempt(0);setLoaded(false)},[ticker]);
-  return <span aria-hidden="true" className={`stock-mark ${palette[ticker] || "blue"} ${small ? "small" : ""} ${loaded?"has-company-logo":""}`}>
+  return <span aria-hidden="true" className={`stock-mark ${colour} ${small ? "small" : ""} ${loaded?"has-company-logo":""}`}>
     {!loaded&&<span>{ticker.slice(0,2)}</span>}
     {candidates[attempt]&&<img className={`company-logo ${loaded?"is-loaded":""}`} src={candidates[attempt]} alt="" width={32} height={32} loading="lazy" decoding="async" referrerPolicy="no-referrer" onLoad={()=>setLoaded(true)} onError={()=>{setLoaded(false);setAttempt(n=>n+1)}}/>}
   </span>;
@@ -78,10 +80,22 @@ export default function Desk() {
   const [view,setView]=useState<View>("watchlist"),[query,setQuery]=useState(""),[sort,setSort]=useState("upside"),[filter,setFilter]=useState("All stocks");
   const [selected,setSelected]=useState<string|null>(null),[adding,setAdding]=useState(false),[ticker,setTicker]=useState(""),[addError,setAddError]=useState("");
   const [busy,setBusy]=useState<Set<string>>(new Set()),[allRefreshing,setAllRefreshing]=useState(false),[refreshProgress,setRefreshProgress]=useState("");
+  const autoRefreshDone=useRef(false);
   const [toast,setToast]=useState<{text:string;error?:boolean}|null>(null);
   const notify=(text:string,error=false)=>setToast({text,error});
   async function load(){setLoading(true);setLoadError("");try{setStocks((await request()).stocks)}catch(e){setLoadError((e as Error).message)}finally{setLoading(false)}}
   useEffect(()=>{load()},[]);
+  // Refresh on load when the data is stale (no Cloudflare schedule):
+  // once per mount, only after the first load, only if the newest
+  // snapshot is older than 6 hours. refreshAll() itself bails out if a
+  // refresh is already running, and the API throttles per stock (20s).
+  useEffect(()=>{
+    if(loading||loadError||autoRefreshDone.current||!stocks.length)return;
+    const latestTs=Math.max(...stocks.map(s=>Date.parse(s.snapshot.attemptedAt||"")||0));
+    if(latestTs&&Date.now()-latestTs<6*60*60*1000){autoRefreshDone.current=true;return;}
+    autoRefreshDone.current=true;
+    refreshAll();
+  },[loading,loadError,stocks]);
   useEffect(()=>{if(!toast)return;const t=setTimeout(()=>setToast(null),6000);return()=>clearTimeout(t)},[toast]);
   function replace(s:Stock){setStocks(prev=>prev.some(p=>p.ticker===s.ticker)?prev.map(p=>p.ticker===s.ticker?s:p):[...prev,s])}
   async function action(body:any){const data=await request(body);if(data.stock)replace(data.stock);return data}
@@ -117,8 +131,8 @@ export default function Desk() {
   const latest=stocks.map(s=>s.snapshot.attemptedAt).filter(Boolean).sort().at(-1);
   function exportCSV(){
     const headers=["Ticker","Company","Currency","Price","Quote as of","Average analyst target","Target upside %","EPS TTM","Forward PE","Short float %","Shares short","SI settlement date","Days to cover","Borrow fee % p.a.","Shares available IBKR","Borrow as of","Stage","Notes","Manual overrides","Draft thesis","Price trend","CANSLIM clear passes","CANSLIM unverified"];
-    const csv=[headers,...stocks.map(st=>{const s=effective(st);return [st.ticker,st.name,s.currency,s.price,s.quoteAt,s.target,upside(s),s.eps,s.forwardPE,s.shortFloatPct,s.shortShares,s.shortDate,s.daysToCover,s.borrowFee,s.available,s.borrowAt,st.stage,st.notes,JSON.stringify(st.manual),researchOf(st).summary,researchOf(st).technicals.trend,researchOf(st).canslim.passes,researchOf(st).canslim.unknown]})].map(row=>row.map(c=>'"'+String(c??"").replace(/"/g,'""')+'"').join(",")).join("\r\n");
-    const url=URL.createObjectURL(new Blob([csv],{type:"text/csv;charset=utf-8;"}));const a=document.createElement("a");a.href=url;a.download=`research-desk-${new Date().toISOString().slice(0,10)}.csv`;a.click();URL.revokeObjectURL(url);notify("Watchlist exported.");
+    const csv=[headers,...rows.map(st=>{const s=effective(st);return [st.ticker,st.name,s.currency,s.price,s.quoteAt,s.target,upside(s),s.eps,s.forwardPE,s.shortFloatPct,s.shortShares,s.shortDate,s.daysToCover,s.borrowFee,s.available,s.borrowAt,st.stage,st.notes,JSON.stringify(st.manual),researchOf(st).summary,researchOf(st).technicals.trend,researchOf(st).canslim.passes,researchOf(st).canslim.unknown]})].map(row=>row.map(c=>'"'+String(c??"").replace(/"/g,'""')+'"').join(",")).join("\r\n");
+    const url=URL.createObjectURL(new Blob([csv],{type:"text/csv;charset=utf-8;"}));const a=document.createElement("a");a.href=url;a.download=`research-desk-${new Date().toISOString().slice(0,10)}.csv`;a.click();URL.revokeObjectURL(url);notify(`Exported ${rows.length} stock${rows.length===1?"":"s"}.`);
   }
   return <div className="app-shell">
     <aside className="sidebar">
@@ -131,7 +145,7 @@ export default function Desk() {
       <div className="sidebar-bottom"><div className="avatar">OB</div><div><strong>Ollie’s desk</strong><span><LockKeyhole size={11}/> Private workspace</span></div></div>
     </aside>
     <main className="main">
-      <header className="topbar"><div className="breadcrumb">Workspace <ChevronRight size={13}/><span>{view==="watchlist"?"Valuation watchlist":view==="squeeze"?"Short squeeze":view==="notes"?"Investment theses":"Data & sources"}</span></div><div className="manual-mode"><span/>Manual refresh only <span className="top-divider"/><LockKeyhole size={13}/><span className="private-text">Private</span></div></header>
+      <header className="topbar"><div className="breadcrumb">Workspace <ChevronRight size={13}/><span>{view==="watchlist"?"Valuation watchlist":view==="squeeze"?"Short squeeze":view==="notes"?"Investment theses":"Data & sources"}</span></div><div className="manual-mode"><span/>Auto-refresh on load when stale <span className="top-divider"/><LockKeyhole size={13}/><span className="private-text">Private</span></div></header>
       <div className="content">
         <section className="page-heading"><div><div className="eyebrow"><span/>THE RESEARCH DESK</div><h1>{view==="watchlist"?"A clearer view of value.":view==="squeeze"?"Where the pressure builds.":view==="notes"?"The case behind the ticker.":"Know what’s behind the numbers."}</h1><p>{view==="watchlist"?"The stocks you’re watching. The numbers that matter. Your next piece of research.":view==="squeeze"?"Short interest, borrowing pressure and volume — side by side.":view==="notes"?"Automatically researched on addition. Built around your themes, valuation discipline and price confirmation.":"Dated snapshots, transparent sources and a refresh when you need one."}</p></div><div className="heading-actions"><button className="button secondary" onClick={refreshAll} disabled={loading||allRefreshing||!!busy.size||!stocks.length}><RefreshCw size={15} className={allRefreshing?"spin":""}/>{allRefreshing?refreshProgress:"Refresh all"}</button><button className="button primary" onClick={()=>{setAdding(true);setAddError("")}} disabled={loading||allRefreshing}><Plus size={17}/>Add ticker</button></div></section>
         {loadError?<div className="error-banner" role="alert">{loadError}<button onClick={load}>Try again</button></div>:<>
