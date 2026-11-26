@@ -333,11 +333,85 @@ def _rss_field(item: str, name: str) -> str:
     return re.sub(r"\s+", " ", text).strip()
 
 
+def _rss_tag_attr(item: str, tag: str, attr: str) -> str:
+    """The ``attr`` value of the first ``<tag ... attr="...">`` in an RSS item."""
+    match = re.search(
+        rf"<{re.escape(tag)}\b[^>]*\b{re.escape(attr)}\s*=\s*\"([^\"]+)\"",
+        item,
+        flags=re.IGNORECASE,
+    )
+    return match.group(1).strip() if match else ""
+
+
+def _rss_image(item: str) -> str | None:
+    """A real thumbnail for an RSS item, where the feed supplies one.
+
+    Google News RSS rarely supplies a thumbnail, so this also accepts a
+    media enclosure / media content image and an <img> in the description.
+    Returns None when the feed supplies no image; callers fall back to the
+    publisher's favicon instead of inventing an image.
+    """
+    for tag in ("media:thumbnail", "media:content"):
+        url = _rss_tag_attr(item, tag, "url")
+        if url.startswith("http"):
+            if tag == "media:content":
+                kind = _rss_tag_attr(item, tag, "type")
+                if kind and not kind.lower().startswith("image/"):
+                    continue
+            return url
+    enclosure = re.search(
+        r"<enclosure\b[^>]*>", item, flags=re.IGNORECASE
+    )
+    if enclosure:
+        kind = _rss_tag_attr(enclosure.group(0), "enclosure", "type")
+        url = _rss_tag_attr(enclosure.group(0), "enclosure", "url")
+        if url.startswith("http") and kind.lower().startswith("image/"):
+            return url
+    description = _rss_field(item, "description")
+    img = re.search(r"<img\b[^>]*\bsrc\s*=\s*\"([^\"]+)\"", description, flags=re.IGNORECASE)
+    if img and img.group(1).startswith("http"):
+        return img.group(1)
+    return None
+
+
+def _rss_source(item: str) -> dict[str, str | None]:
+    """Publisher name and URL from an RSS item's <source> tag, if present."""
+    match = re.search(
+        r"<source\b[^>]*>([\s\S]*?)</source>", item, flags=re.IGNORECASE
+    )
+    if not match:
+        return {"name": None, "url": None}
+    name = re.sub(r"\s+", " ", re.sub(r"<[^>]*>", "", match.group(1))).strip() or None
+    url = _rss_tag_attr(match.group(0), "source", "url") or None
+    return {"name": name, "url": url}
+
+
+def favicon_url(source_url: str | None) -> str | None:
+    """Google's favicon service URL for a publisher's domain, or None.
+
+    This is the publisher's own favicon, fetched by domain — not a stock
+    photo and not an image invented for the story.
+    """
+    if not source_url:
+        return None
+    try:
+        domain = urllib.parse.urlparse(source_url).netloc
+    except Exception:
+        return None
+    if not domain:
+        return None
+    return f"https://www.google.com/s2/favicons?domain={urllib.parse.quote(domain)}&sz=64"
+
+
 def fetch_news_rss(query: str, getter=None) -> list[dict]:
     """Google News RSS headlines for a query, up to 5.
 
-    Returns a list of ``{"title", "url", "date"}``. Returns [] on failure
-    and never raises.
+    Returns a list of ``{"title", "url", "date", "image", "source",
+    "source_url", "favicon"}``. ``image`` is a real thumbnail from the
+    feed (media thumbnail / enclosure / description image) where the feed
+    supplies one, else None — in that case ``favicon`` is the publisher's
+    favicon for the small thumbnail slot. Returns [] on failure and never
+    raises.
     """
     text = (query or "").strip()
     if not text:
@@ -357,7 +431,18 @@ def fetch_news_rss(query: str, getter=None) -> list[dict]:
             date = _rss_field(item, "pubDate")
             if not title or not link:
                 continue
-            items.append({"title": title, "url": link, "date": date or None})
+            source = _rss_source(item)
+            items.append(
+                {
+                    "title": title,
+                    "url": link,
+                    "date": date or None,
+                    "image": _rss_image(item),
+                    "source": source["name"],
+                    "source_url": source["url"],
+                    "favicon": favicon_url(source["url"]),
+                }
+            )
             if len(items) >= 5:
                 break
     except Exception:

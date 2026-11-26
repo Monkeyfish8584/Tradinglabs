@@ -9,10 +9,13 @@ Watchlist search, filter, sort and CSV export, generic stock logos, and
 auto-refresh on a stale load follow the React desk (PR #55). Concurrent
 refresh and up to five headlines per stock follow PR #56. Company-name
 search, insider trades, five-year closes, multi-timeframe macro trends with
-news, near-high/low breadth, and the Technical/Sentiment/Fundamental spider
-follow PR #57 (research-desk/lib/macro.ts). The spider's Fundamental axis is
-adapted for Streamlit: there is no CANSLIM data here, so it uses the share
-of stocks with forward P/E below 20 and the share with EPS (TTM) above zero.
+news, and near-high/low breadth follow PR #57 (research-desk/lib/macro.ts).
+The macro view is grouped — Indices, then Crypto, then Forex — and clicking
+an asset opens its own detail view with its news and, for indices, its
+breadth. The Technical/Sentiment/Fundamental spider lives only on
+individual stocks, centre-aligned; there is no spider in the macro view.
+Its Fundamental axis is adapted for Streamlit: there is no CANSLIM data
+here, so it uses forward P/E below 20 and EPS (TTM) above zero.
 Politician/congressional trades are not available: there is no free
 structured feed, and disclosures are typically value ranges with no exact
 entry price. The BofA Bull & Bear score is proprietary and is not available
@@ -28,6 +31,7 @@ import json
 import math
 import re
 import tempfile
+import urllib.parse
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -50,18 +54,26 @@ from research_desk_quotes import (
 )
 
 # Display name, then the Yahoo symbol. GER30 is the DAX index Yahoo publishes as ^GDAXI.
-# The original seven markets stay first; the FX pairs follow (PR #57).
+# Grouped in display order: Indices first, then Crypto, then Forex.
 MACRO_MARKETS: tuple[tuple[str, str], ...] = (
-    ("BTCUSD", "BTC-USD"),
     ("US500", "^GSPC"),
     ("US100", "^NDX"),
     ("US30", "^DJI"),
-    ("ETHUSD", "ETH-USD"),
     ("UK100", "^FTSE"),
     ("GER30", "^GDAXI"),
+    ("BTCUSD", "BTC-USD"),
+    ("ETHUSD", "ETH-USD"),
     ("EUR/USD", "EURUSD=X"),
     ("GBP/JPY", "GBPJPY=X"),
     ("USD/JPY", "USDJPY=X"),
+)
+
+# Asset groups for the macro view, in display order. Each group gets its own
+# headed section — never one long mixed column of assets.
+MACRO_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("Indices", ("US500", "US100", "US30", "UK100", "GER30")),
+    ("Crypto", ("BTCUSD", "ETHUSD")),
+    ("Forex", ("EUR/USD", "GBP/JPY", "USD/JPY")),
 )
 
 CLOSE_WINDOWS = (90, 365, 1825)
@@ -491,37 +503,112 @@ def _macro_trend_label(value: object) -> str:
     return "Unavailable"
 
 
-def macro_trends_html(rows: list[dict], selected: str | None = None) -> str:
-    cards: list[str] = []
-    for row in rows:
-        label = str(row.get("label") or "")
-        daily = trend_text(row.get("daily")) if row.get("available") else "Unavailable"
-        weekly = trend_text(row.get("weekly")) if row.get("available") else "Unavailable"
-        four_hour = _macro_trend_label(row.get("four_hour")) if row.get("available") else "Unavailable"
-        name = html.escape(label)
-        if label in BREADTH_SOURCES:
-            href = html.escape(f"?breadth={label}", quote=True)
-            name = f'<a href="{href}" target="_self">{name}</a>'
-        selected_class = " macro-selected" if label == selected else ""
-        news = row.get("news") if isinstance(row.get("news"), list) else []
-        if news:
-            news_html = "<div class=\"macro-news\">" + "".join(
-                f"<div><a href=\"{html.escape(str(item.get('url') or ''), quote=True)}\" target=\"_blank\" rel=\"noopener\">{html.escape(str(item.get('title') or ''))}</a></div>"
-                for item in news[:5]
-                if isinstance(item, dict) and item.get("title") and item.get("url")
-            ) + "</div>"
+MACRO_CSS = """
+<style>
+.macro-strip { display: flex; gap: 0.55rem; flex-wrap: wrap; }
+.macro-card {
+  flex: 1 1 7.5rem; border: 1px solid rgba(128,128,128,0.35);
+  border-radius: 8px; padding: 0.4rem 0.6rem; line-height: 1.35;
+}
+.macro-selected { outline: 2px solid rgba(27,127,74,0.85); }
+.macro-name { font-weight: 700; }
+.macro-name a { color: inherit; }
+.macro-detail-link { margin-top: 0.2rem; font-size: 0.85rem; }
+.macro-up { color: #1b7f4a; font-weight: 700; }
+.macro-down { color: #b42318; font-weight: 700; }
+.macro-flat, .macro-missing { font-weight: 700; }
+.macro-news { font-size: 0.85rem; line-height: 1.4; margin-top: 0.3rem; }
+.macro-news a { font-weight: 400; }
+.macro-news-item { display: flex; gap: 0.45rem; align-items: flex-start; margin-top: 0.35rem; }
+.macro-news-thumb { width: 48px; height: 36px; object-fit: cover; border-radius: 4px; flex: none; }
+.macro-news-favicon { object-fit: contain; background: #fff; border: 1px solid rgba(128,128,128,0.3); }
+.macro-news-placeholder {
+  display: inline-flex; align-items: center; justify-content: center;
+  background: #6b7280; color: #fff; font-weight: 700; font-size: 1rem;
+}
+.macro-news-meta { font-size: 0.75rem; color: rgba(128,128,128,0.9); }
+</style>
+"""
+
+
+def _news_html(news: list | None, limit: int = 5) -> str:
+    """News items as headline links with a small thumbnail each.
+
+    The thumbnail is the real image from the news feed where the feed
+    supplies one (``image``), else the publisher's favicon (``favicon``),
+    else a small placeholder with the publisher's initial. No image is
+    invented or fetched from an unrelated source.
+    """
+    items = [item for item in (news or []) if isinstance(item, dict) and item.get("title") and item.get("url")]
+    if not items:
+        return "<div class=\"macro-news\">News unavailable</div>"
+    parts: list[str] = ["<div class=\"macro-news\">"]
+    for item in items[:limit]:
+        title = html.escape(str(item.get("title")))
+        url = html.escape(str(item.get("url")), quote=True)
+        source = html.escape(str(item.get("source") or ""))
+        date_text = html.escape(str(item.get("date") or ""))
+        meta = " · ".join(part for part in (source, date_text) if part)
+        meta_html = f"<div class=\"macro-news-meta\">{meta}</div>" if meta else ""
+        image = item.get("image")
+        favicon = item.get("favicon")
+        if isinstance(image, str) and image.startswith("http"):
+            thumb = (
+                f'<img class="macro-news-thumb" src="{html.escape(image, quote=True)}" alt="" loading="lazy" '
+                f"onerror=\"this.style.display='none'\" />"
+            )
+        elif isinstance(favicon, str) and favicon.startswith("http"):
+            thumb = (
+                f'<img class="macro-news-thumb macro-news-favicon" src="{html.escape(favicon, quote=True)}" alt="" loading="lazy" '
+                f"onerror=\"this.style.display='none'\" />"
+            )
         else:
-            news_html = "<div class=\"macro-news\">News unavailable</div>"
-        cards.append(
-            f"<div class=\"macro-card{selected_class}\">"
-            f"<div class=\"macro-name\">{name}</div>"
-            f"<div>Daily <span class=\"{_trend_class(row.get('daily') if row.get('available') else None)}\">{html.escape(daily)}</span></div>"
-            f"<div>Weekly <span class=\"{_trend_class(row.get('weekly') if row.get('available') else None)}\">{html.escape(weekly)}</span></div>"
-            f"<div>4-hour <span class=\"{_trend_class(four_hour if row.get('available') else None)}\">{html.escape(four_hour)}</span></div>"
-            f"{news_html}"
-            "</div>"
+            initial = html.escape((source or "?")[:1].upper())
+            thumb = f'<span class="macro-news-thumb macro-news-placeholder" aria-hidden="true">{initial}</span>'
+        parts.append(
+            f"<div class=\"macro-news-item\">{thumb}"
+            f"<div><a href=\"{url}\" target=\"_blank\" rel=\"noopener\">{title}</a>{meta_html}</div></div>"
         )
-    return "<div class=\"macro-strip\">" + "".join(cards) + "</div>"
+    parts.append("</div>")
+    return "".join(parts)
+
+
+def macro_trends_html(rows: list[dict], selected: str | None = None) -> str:
+    """Macro assets grouped — Indices, then Crypto, then Forex — each group headed.
+
+    Every asset name is a link to its own detail view (``?asset=<label>``).
+    The overview shows up to 3 headlines per asset; the detail view shows 5.
+    """
+    by_label = {str(row.get("label") or ""): row for row in rows}
+    sections: list[str] = []
+    for group_name, labels in MACRO_GROUPS:
+        cards: list[str] = []
+        for label in labels:
+            row = by_label.get(label)
+            if row is None:
+                continue
+            daily = trend_text(row.get("daily")) if row.get("available") else "Unavailable"
+            weekly = trend_text(row.get("weekly")) if row.get("available") else "Unavailable"
+            four_hour = _macro_trend_label(row.get("four_hour")) if row.get("available") else "Unavailable"
+            name = html.escape(label)
+            href = html.escape(f"?asset={urllib.parse.quote(label)}", quote=True)
+            name = f'<a href="{href}" target="_self">{name}</a>'
+            selected_class = " macro-selected" if label == selected else ""
+            news = row.get("news") if isinstance(row.get("news"), list) else []
+            detail_label = "View news & breadth →" if label in BREADTH_SOURCES else "View news →"
+            cards.append(
+                f"<div class=\"macro-card{selected_class}\">"
+                f"<div class=\"macro-name\">{name}</div>"
+                f"<div>Daily <span class=\"{_trend_class(row.get('daily') if row.get('available') else None)}\">{html.escape(daily)}</span></div>"
+                f"<div>Weekly <span class=\"{_trend_class(row.get('weekly') if row.get('available') else None)}\">{html.escape(weekly)}</span></div>"
+                f"<div>4-hour <span class=\"{_trend_class(four_hour if row.get('available') else None)}\">{html.escape(four_hour)}</span></div>"
+                f"<div class=\"macro-detail-link\"><a href=\"{href}\" target=\"_self\">{detail_label}</a></div>"
+                f"{_news_html(news, limit=3)}"
+                "</div>"
+            )
+        if cards:
+            sections.append(f"<h3>{html.escape(group_name)}</h3><div class=\"macro-strip\">" + "".join(cards) + "</div>")
+    return "".join(sections)
 
 
 def _ticker_cell(text: str, pattern: str) -> str | None:
@@ -690,106 +777,110 @@ def breadth_text(summary: dict) -> str:
     return text
 
 
-def _bullish_share(instruments: list[dict], key: str) -> float | None:
-    """Share of instruments that are Bullish on one timeframe.
+def _spider_verdict(technical: int | None, sentiment: int | None, fundamental: int | None) -> tuple[str, str]:
+    """Verdict for a Technical/Sentiment/Fundamental spider, 0-10 each.
 
-    Accepts the Streamlit macro rows (daily/weekly as Up/Down/Flat strings,
-    four_hour as a macro_trend_for dict) and the React shape (dicts with a
-    ``label`` of Bullish/Bearish/Mixed).
+    Same wording as the macro spider had (PR #57): a high Sentiment score
+    means crowded, which is caution, not a buy signal.
     """
-    values = [row.get(key) for row in instruments if row.get(key) is not None]
-    if not values:
-        return None
-    bullish = 0
-    for value in values:
-        if isinstance(value, dict):
-            bullish += 1 if value.get("label") == "Bullish" else 0
-        elif value in {"Up", "Bullish"}:
-            bullish += 1
-    return bullish / len(values)
-
-
-def compute_macro_spider(instruments: list[dict], breadth: list[dict], snapshots: list[dict]) -> dict:
-    """Technical/Sentiment/Fundamental spider, 0-10 each (PR #57, macro.ts ``computeMacroSpider``).
-
-    Technical (10): daily Bullish share x4 + weekly x3 + 4-hour x1 + breadth
-    net x2; capped at 6 if net breadth is negative while indices rise.
-    Sentiment (10): breadth crowdedness x5 + daily Bullish share x3 + weekly
-    x2, read backwards -- high = crowded = caution, proxy only.
-    Fundamental (10): ADAPTED for Streamlit, because there is no CANSLIM
-    data here: share of stocks with forward P/E below 20 x5 + share with
-    EPS (TTM) above zero x5, averaged across the stocks on the desk.
-    An axis with no usable inputs is None (Unavailable), never 0.
-    """
-    clamp = lambda n: max(0, min(10, round(n)))
-    daily = _bullish_share(instruments, "daily")
-    weekly = _bullish_share(instruments, "weekly")
-    four_hour = _bullish_share(instruments, "four_hour")
-    if four_hour is None:
-        four_hour = _bullish_share(instruments, "fourHour")
-    usable_breadth = [
-        item
-        for item in breadth
-        if isinstance(item, dict) and not item.get("error") and (item.get("measured") or item.get("total"))
-    ]
-    nets = [
-        (item["highs"] - item["lows"]) / (item.get("measured") or item["total"])
-        for item in usable_breadth
-        if isinstance(item.get("highs"), (int, float)) and isinstance(item.get("lows"), (int, float))
-    ]
-    net = sum(nets) / len(nets) if nets else None
-    near_highs = [
-        item["highs"] / (item.get("measured") or item["total"])
-        for item in usable_breadth
-        if isinstance(item.get("highs"), (int, float))
-    ]
-    crowded = sum(near_highs) / len(near_highs) if near_highs else None
-    technical: int | None = None
-    if daily is not None or weekly is not None or four_hour is not None or net is not None:
-        breadth_part = 0 if net is None else max(0.0, min(1.0, (net + 0.2) / 0.4)) * 2
-        technical = clamp((daily or 0) * 4 + (weekly or 0) * 3 + (four_hour or 0) * 1 + breadth_part)
-        if net is not None and net < 0 and (daily or 0) > 0.5 and technical > 6:
-            technical = 6
-    sentiment: int | None = None
-    if crowded is not None or daily is not None or weekly is not None:
-        sentiment = clamp((0 if crowded is None else min(1.0, crowded / 0.3) * 5) + (daily or 0) * 3 + (weekly or 0) * 2)
-    fundamental: int | None = None
-    if snapshots:
-        with_pe = [s for s in snapshots if isinstance(s.get("forwardPE"), (int, float)) and not isinstance(s.get("forwardPE"), bool)]
-        with_eps = [s for s in snapshots if isinstance(s.get("eps"), (int, float)) and not isinstance(s.get("eps"), bool)]
-        if with_pe or with_eps:
-            value_part = (sum(1 for s in with_pe if float(s["forwardPE"]) < 20) / len(with_pe) * 5) if with_pe else 0
-            eps_part = (sum(1 for s in with_eps if float(s["eps"]) > 0) / len(with_eps) * 5) if with_eps else 0
-            fundamental = clamp(value_part + eps_part)
-    axes = [
-        {"axis": "Technical", "score": technical, "note": "Daily trend x4, weekly x3, 4-hour x1, breadth x2; capped at 6 if breadth is negative while indices rise."},
-        {"axis": "Sentiment", "score": sentiment, "note": "Read backwards -- high = crowded = caution. Breadth crowdedness x5, daily x3, weekly x2. Proxy only: no put/call ratio or live BofA reading in this desk."},
-        {"axis": "Fundamental", "score": fundamental, "note": "Adapted for Streamlit (no CANSLIM here): share of desk stocks with forward P/E <20 x5 + share with EPS (TTM) >0 x5."},
-    ]
-    technical_score, sentiment_score, fundamental_score = technical, sentiment, fundamental
     verdict = "Mixed — check the axes below."
     verdict_note = "No single shape dominates. Read the lowest axis first: that is where the setup is weakest."
-    if technical_score is not None and sentiment_score is not None and fundamental_score is not None:
-        if sentiment_score >= 8 and fundamental_score >= 6 and technical_score >= 6:
+    if technical is not None and sentiment is not None and fundamental is not None:
+        if sentiment >= 8 and fundamental >= 6 and technical >= 6:
             verdict = "Crowded, not broken"
             verdict_note = "Sentiment is high but fundamentals are decent and the trend is up. Everyone already likes it — expect sharp dips on any disappointment — but the underlying story looks intact. Picky entries, sensible size."
-        elif technical_score < 4 and fundamental_score >= 6:
+        elif technical < 4 and fundamental >= 6:
             verdict = "Watchlist, not a short"
             verdict_note = "Technically weak but fundamentally strong. Wait for the trend to turn rather than shorting a good story."
-        elif technical_score >= 7 and sentiment_score >= 7 and fundamental_score < 4:
+        elif technical >= 7 and sentiment >= 7 and fundamental < 4:
             verdict = "Momentum-bubble shape"
             verdict_note = "Trend and crowd are hot, fundamentals are weak. Momentum can run, but there is little underneath it."
-        elif technical_score < 4 and sentiment_score < 4 and fundamental_score < 4:
+        elif technical < 4 and sentiment < 4 and fundamental < 4:
             verdict = "No reason to be here yet"
             verdict_note = "All three axes are low. Nothing in the setup earns attention right now."
-        elif 5 <= technical_score <= 7 and 5 <= sentiment_score <= 7 and 5 <= fundamental_score <= 7:
+        elif 5 <= technical <= 7 and 5 <= sentiment <= 7 and 5 <= fundamental <= 7:
             verdict = "Healthy, well-rounded setup"
             verdict_note = "A balanced triangle: trend, crowd and fundamentals are all in the middle of the range."
+    return verdict, verdict_note
+
+
+def compute_stock_spider(snapshot: dict) -> dict:
+    """Technical/Sentiment/Fundamental spider for one stock, 0-10 each.
+
+    Same 0-10 axes as the macro spider had, scored from this stock's own
+    snapshot only — nothing is borrowed from other stocks or invented.
+    Each axis is rescaled over the inputs that are actually available, so a
+    missing input does not drag the score to zero; an axis with no usable
+    inputs is None (Unavailable), never 0.
+
+    Technical (10): daily trend x4 (Up 4, Flat 2, Down 0), weekly trend x3
+    (Up 3, Flat 1.5, Down 0), price vs the 200-day average x3 (Above 3,
+    Below 0). Needs at least one of daily trend, weekly trend, 200-day
+    position; fewer than 200 stored closes means no 200-day position.
+    Sentiment (10), read backwards — high = crowded = caution: RSI(14)
+    distance from 50 x5, plus short float x5 (short float / 20%, capped).
+    Fundamental (10): forward P/E below 20 x5 + EPS (TTM) above zero x5 —
+    the same adaptation the macro spider used, here for one stock.
+    """
+    clamp = lambda n: max(0, min(10, round(n)))
+
+    def rescale(scored: float, possible: float) -> int | None:
+        if possible <= 0:
+            return None
+        return clamp(scored / possible * 10)
+
+    trend_points = {"Up": 1.0, "Flat": 0.5, "Down": 0.0}
+    technical_scored = 0.0
+    technical_possible = 0.0
+    daily = daily_trend(snapshot)
+    if daily in trend_points:
+        technical_scored += trend_points[daily] * 4
+        technical_possible += 4
+    weekly = weekly_trend(snapshot)
+    if weekly in trend_points:
+        technical_scored += trend_points[weekly] * 3
+        technical_possible += 3
+    position = average_position(snapshot)
+    if position in {"Above", "Below"}:
+        technical_scored += 3 if position == "Above" else 0
+        technical_possible += 3
+    technical = rescale(technical_scored, technical_possible)
+
+    sentiment_scored = 0.0
+    sentiment_possible = 0.0
+    rsi = rsi_14(snapshot)
+    if rsi is not None:
+        sentiment_scored += min(1.0, abs(rsi - 50) / 50) * 5
+        sentiment_possible += 5
+    short_float = _snapshot_number(snapshot, "shortFloatPct")
+    if short_float is not None:
+        sentiment_scored += min(1.0, max(0.0, short_float) / 20) * 5
+        sentiment_possible += 5
+    sentiment = rescale(sentiment_scored, sentiment_possible)
+
+    fundamental_scored = 0.0
+    fundamental_possible = 0.0
+    forward_pe = _snapshot_number(snapshot, "forwardPE")
+    if forward_pe is not None:
+        fundamental_scored += 5 if forward_pe < 20 else 0
+        fundamental_possible += 5
+    eps = _snapshot_number(snapshot, "eps")
+    if eps is not None:
+        fundamental_scored += 5 if eps > 0 else 0
+        fundamental_possible += 5
+    fundamental = rescale(fundamental_scored, fundamental_possible)
+
+    axes = [
+        {"axis": "Technical", "score": technical, "note": "Daily trend x4, weekly trend x3, price vs 200-day average x3; rescaled over the inputs available for this stock."},
+        {"axis": "Sentiment", "score": sentiment, "note": "Read backwards — high = crowded = caution. RSI(14) distance from 50 x5 + short float x5 (20% = full). Proxy only: no put/call ratio or live BofA reading in this desk."},
+        {"axis": "Fundamental", "score": fundamental, "note": "Forward P/E below 20 x5 + EPS (TTM) above zero x5; rescaled over the inputs available for this stock."},
+    ]
+    verdict, verdict_note = _spider_verdict(technical, sentiment, fundamental)
     return {"axes": axes, "verdict": verdict, "verdict_note": verdict_note}
 
 
 def _spider_svg(axes: list[dict]) -> str:
-    """Hand-rolled SVG triangle for the macro spider (same pattern as the React macro panel)."""
+    """Hand-rolled SVG triangle for a Technical/Sentiment/Fundamental spider (same pattern as the React macro panel)."""
     centre_x, centre_y, radius = 150.0, 140.0, 110.0
     vertices = {
         "Technical": (centre_x, centre_y - radius),
@@ -816,7 +907,7 @@ def _spider_svg(axes: list[dict]) -> str:
         scored_points.append(point(axis, (score / 10) if isinstance(score, (int, float)) else 0))
     scored = " ".join(f"{x:.1f},{y:.1f}" for x, y in scored_points)
     parts = [
-        '<svg width="300" height="260" viewBox="0 0 300 260" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Macro spider diagram">',
+        '<svg width="300" height="260" viewBox="0 0 300 260" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Spider diagram">',
         f'<polygon points="{polygon(1.0)}" fill="none" stroke="#888888" stroke-opacity="0.5" />',
         f'<polygon points="{polygon(0.5)}" fill="none" stroke="#888888" stroke-opacity="0.35" />',
     ]
@@ -841,13 +932,24 @@ def cached_macro_rows() -> list[dict]:
     return load_macro_rows()
 
 
-def _requested_breadth() -> str | None:
-    value = st.query_params.get("breadth")
-    if isinstance(value, list):
-        value = value[0] if value else None
-    if not isinstance(value, str) or not value.strip():
+def _requested_macro() -> str | None:
+    """Macro asset requested via ``?asset=<label>`` (``?breadth=<label>`` still works for old links).
+
+    Matches case-insensitively against MACRO_MARKETS so ``us500`` and
+    ``US500`` both work; returns the canonical label or None.
+    """
+    for key in ("asset", "breadth"):
+        value = st.query_params.get(key)
+        if isinstance(value, list):
+            value = value[0] if value else None
+        if not isinstance(value, str) or not value.strip():
+            continue
+        wanted = value.strip().upper()
+        for label, _symbol in MACRO_MARKETS:
+            if label.upper() == wanted:
+                return label
         return None
-    return value.strip().upper()
+    return None
 
 
 @st.cache_data(ttl=1800, show_spinner=False)
@@ -856,7 +958,11 @@ def cached_breadth(label: str) -> dict:
 
 
 def render_macro_trends() -> None:
-    """Daily and weekly trend for the macro markets, shown above either page."""
+    """Macro trends, grouped Indices / Crypto / Forex, on the Research Desk page.
+
+    Clicking an asset opens its own detail view (its news and, for indices,
+    its breadth). There is no spider in the macro view.
+    """
     st.markdown("**Macro trends**")
     with st.spinner("Loading macro trends…"):
         try:
@@ -864,52 +970,70 @@ def render_macro_trends() -> None:
         except Exception:
             st.caption("Macro trends could not be loaded.")
             return
-    selected = _requested_breadth()
+    selected = _requested_macro()
+    labels = {str(row.get("label") or "") for row in rows}
+    if selected is not None and selected not in labels:
+        st.warning(f"{selected} is not a macro asset in this desk.")
+        selected = None
+    if selected is not None:
+        _render_macro_asset(selected, rows)
+        return
     st.markdown(
-        """
-        <style>
-        .macro-strip { display: flex; gap: 0.55rem; flex-wrap: wrap; }
-        .macro-card {
-          flex: 1 1 7.5rem; border: 1px solid rgba(128,128,128,0.35);
-          border-radius: 8px; padding: 0.4rem 0.6rem; line-height: 1.35;
-        }
-        .macro-selected { outline: 2px solid rgba(27,127,74,0.85); }
-        .macro-name { font-weight: 700; }
-        .macro-name a { color: inherit; }
-        .macro-up { color: #1b7f4a; font-weight: 700; }
-        .macro-down { color: #b42318; font-weight: 700; }
-        .macro-flat, .macro-missing { font-weight: 700; }
-        </style>
-        """
+        MACRO_CSS
         + macro_trends_html(rows, selected),
         unsafe_allow_html=True,
     )
     st.caption(
+        "Indices at the top, then Crypto, then Forex. "
         "Daily, weekly and 4-hour trend. "
         "Daily is Up when the latest close is higher than each of the previous three daily closes, and Down when it is lower than each of them. Otherwise it is Flat. "
         "Weekly is this week's close against the previous week's close. "
         "4-hour is the Bullish/Bearish/Mixed read from 4-hour candles: Bullish when the close is up on the period and above its 20-period average, Bearish when it is down and below it, otherwise Mixed. "
-        "Click an index for the share of its constituents near a 52-week high or low. This does not apply to BTCUSD or ETHUSD. "
+        "Click an asset — its name, or “View news” — to open its own page with its news and, for indices, the share of its constituents near a 52-week high or low. "
+        "That breadth read does not apply to crypto or forex: they have no constituent list. "
+        "Each news item shows a small thumbnail: the image from the news feed where the feed supplies one, otherwise the publisher's favicon. "
         "The BofA Bull & Bear score is proprietary and not available in this desk; the breadth + trend read is the desk's own equivalent."
     )
-    if selected:
-        _render_breadth(selected)
-    _render_macro_spider(rows)
 
 
-def _render_macro_spider(rows: list[dict]) -> None:
-    """Technical/Sentiment/Fundamental spider for the macro view (PR #57)."""
-    st.markdown("**Macro spider**")
-    try:
-        breadth = [cached_breadth(label) for label in BREADTH_SOURCES]
-    except Exception:
-        breadth = []
-    try:
-        snapshots = _current_snapshots()
-    except Exception:
-        snapshots = load_snapshots()
-    spider = compute_macro_spider(rows, breadth, snapshots)
-    st.markdown(_spider_svg(spider["axes"]), unsafe_allow_html=True)
+def _render_macro_asset(label: str, rows: list[dict]) -> None:
+    """One macro asset on its own: its trends, its news, and — for indices — its breadth."""
+    if st.button("← Back to all macro trends", key="macro_back"):
+        st.query_params.clear()
+        st.rerun()
+    row = next((item for item in rows if str(item.get("label") or "") == label), None)
+    st.markdown(f"### {label}")
+    if row is None or not row.get("available"):
+        st.caption("Trend and news could not be loaded for this asset.")
+        return
+    daily = trend_text(row.get("daily"))
+    weekly = trend_text(row.get("weekly"))
+    four_hour = _macro_trend_label(row.get("four_hour"))
+    st.write(f"Daily: {daily}. Weekly: {weekly}. 4-hour: {four_hour}.")
+    if isinstance(row.get("four_hour"), dict) and row["four_hour"].get("note"):
+        st.caption(str(row["four_hour"]["note"]))
+    st.markdown("**News**")
+    news = row.get("news") if isinstance(row.get("news"), list) else []
+    st.markdown(MACRO_CSS + _news_html(news, limit=5), unsafe_allow_html=True)
+    st.markdown("**Breadth — new highs vs new lows**")
+    if label in BREADTH_SOURCES:
+        _render_breadth(label)
+    elif label in _NO_BREADTH:
+        st.info(f"Underlying highs and lows do not apply to {label}: crypto has no constituent list, so there is no breadth indicator here.")
+    else:
+        st.info(
+            f"There is no breadth indicator for {label}: a currency pair has no "
+            "constituent list, so there is nothing to count near a 52-week high or low."
+        )
+
+
+def _render_stock_spider(snapshot: dict) -> None:
+    """Centre-aligned Technical/Sentiment/Fundamental spider for one stock."""
+    spider = compute_stock_spider(snapshot)
+    st.markdown("**Spider — Technical / Sentiment / Fundamental**")
+    _col_left, col_centre, _col_right = st.columns([1, 2, 1])
+    with col_centre:
+        st.markdown(_spider_svg(spider["axes"]), unsafe_allow_html=True)
     st.dataframe(
         pd.DataFrame(
             [
@@ -924,7 +1048,8 @@ def _render_macro_spider(rows: list[dict]) -> None:
     st.write(spider["verdict_note"])
     st.caption(
         "Example: Technical 7, Sentiment 8, Fundamental 6 — Crowded, not broken (illustrative example, not live data). "
-        "Sentiment is read backwards: a high score means crowded, which is caution, not a buy signal."
+        "Sentiment is read backwards: a high score means crowded, which is caution, not a buy signal. "
+        "Each axis is scored only from this stock's own snapshot and rescaled over the inputs available; an axis with no usable inputs shows as Unavailable, never 0."
     )
 
 
@@ -1284,10 +1409,16 @@ def watchlist_html(rows: list[dict]) -> str:
 def render_research_desk() -> None:
     _hydrate_quotes()
     _auto_refresh_once()
+    # Macro trends belong to the Research Desk, not the Trading Edge tab:
+    # an ?asset= link opens that asset's own macro detail view on its own.
+    if _requested_macro() is not None:
+        render_macro_trends()
+        return
     ticker = _requested_ticker()
     if ticker:
         _render_stock_page(ticker)
         return
+    render_macro_trends()
     _render_watchlist()
 
 
@@ -1605,6 +1736,8 @@ def _render_detail(snapshot: dict) -> None:
         f"{met}/5",
         help=f"{unknown} unknown" if unknown else "All five inputs are stored on this snapshot",
     )
+
+    _render_stock_spider(snapshot)
 
     st.markdown("**Daily**")
     _view_lines(snapshot, daily_trend(snapshot))
