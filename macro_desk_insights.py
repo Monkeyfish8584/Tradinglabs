@@ -13,6 +13,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timedelta
 
 # Sentiment weights from the implementation plan, section 4 step 6.
@@ -45,6 +46,8 @@ INDEX_ALIASES: dict[str, str] = {
 
 SEC_UA = "Tradinglabs MacroDesk research@tradinglabs.app"
 _FORM4_CODES = {"P": "buy", "S": "sell"}
+_US_TICKER = re.compile(r"^[A-Z]{1,5}(?:[.-][A-Z])?$")
+_FOREIGN_SUFFIX = re.compile(r"\.(?:L|DE|PA|MC|AS|SW|MI|HK|T|TO|AX)$")
 
 
 def subject_id(name: str, extra: dict[str, str] | None = None) -> str | None:
@@ -359,7 +362,24 @@ def _child_text(node: ET.Element, name: str) -> str:
     return _text(found) or _child_text(found, "value")
 
 
-def parse_form4(xml_text: str, filed_at: str = "") -> list[dict]:
+def sec_symbol(ticker: str) -> str | None:
+    """SEC ticker for a US listing, or None for a foreign or index symbol.
+
+    Class shares are accepted. ``BRK.B`` and ``BRK-B`` both become ``BRK-B``,
+    which is how the SEC company list spells them. ``SAP.DE`` stays out.
+    """
+    symbol = (ticker or "").strip().upper()
+    if not symbol or _FOREIGN_SUFFIX.search(symbol) or not _US_TICKER.fullmatch(symbol):
+        return None
+    return symbol.replace(".", "-")
+
+
+def is_form4(form: str) -> bool:
+    """A Form 4 or a Form 4/A amendment."""
+    return str(form or "").strip().upper() in {"4", "4/A"}
+
+
+def parse_form4(xml_text: str, filed_at: str = "", amended: bool = False, accession: str = "") -> list[dict]:
     """Open-market and other transactions from one Form 4 XML document.
 
     Code P is an open-market buy and code S is a sale. Awards and option
@@ -371,13 +391,17 @@ def parse_form4(xml_text: str, filed_at: str = "") -> list[dict]:
         return []
     owner = ""
     role = ""
+    period = ""
     for node in root.iter():
-        if _local(node.tag) == "rptOwnerName" and not owner:
+        local = _local(node.tag)
+        if local == "rptOwnerName" and not owner:
             owner = _text(node)
-        if _local(node.tag) == "officerTitle" and _text(node) and not role:
+        elif local == "officerTitle" and _text(node) and not role:
             role = _text(node)
-        if _local(node.tag) == "isDirector" and _text(node) in {"1", "true"} and not role:
+        elif local == "isDirector" and _text(node) in {"1", "true"} and not role:
             role = "Director"
+        elif local == "periodOfReport" and _text(node) and not period:
+            period = _text(node)[:10]
     trades: list[dict] = []
     for node in root.iter():
         if _local(node.tag) not in {"nonDerivativeTransaction", "derivativeTransaction"}:
@@ -411,6 +435,9 @@ def parse_form4(xml_text: str, filed_at: str = "") -> list[dict]:
             "shares": shares,
             "price": price,
             "value": value,
+            "amended": amended,
+            "accession": accession,
+            "period": period,
         })
     return trades
 
@@ -423,27 +450,62 @@ def _number(value: str) -> float | None:
     return number
 
 
+def _person_key(trade: dict) -> str:
+    return re.sub(r"\s+", " ", str(trade.get("person") or "").strip().upper())
+
+
+def reconcile_amendments(trades: list[dict]) -> list[dict]:
+    """Drop rows that a later Form 4/A restates.
+
+    A later amendment for the same person replaces an earlier filing when
+    they share a reporting period or a trade date. The amendment's own
+    rows stay. A later ordinary Form 4 does not replace an earlier one.
+    """
+    kept: list[dict] = []
+    for trade in trades:
+        filed = str(trade.get("filed_at") or "")
+        person = _person_key(trade)
+        period = str(trade.get("period") or "")
+        traded = str(trade.get("traded_at") or "")[:10]
+        replaced = False
+        for later in trades:
+            if not later.get("amended") or str(later.get("filed_at") or "") <= filed:
+                continue
+            if _person_key(later) != person:
+                continue
+            later_period = str(later.get("period") or "")
+            later_day = str(later.get("traded_at") or "")[:10]
+            if (period and period == later_period) or (traded and traded == later_day):
+                replaced = True
+                break
+        if not replaced:
+            kept.append(trade)
+    return kept
+
+
 def insider_summary(trades: list[dict], today: date, days: int = 30) -> dict:
     """Net open-market activity over the last ``days`` calendar days.
 
-    Only code P and code S count toward the net. A filing with no price
-    still counts as a buy or a sale, and its value stays out of the total.
+    Only code P and code S count toward the net. The net is left unknown
+    unless every buy and every sale in the window published a price, so a
+    missing price cannot be left out of the total.
     """
     start = today - timedelta(days=days)
     window: list[dict] = []
-    for trade in trades:
+    for trade in reconcile_amendments(trades):
         try:
             traded = date.fromisoformat(str(trade.get("traded_at") or "")[:10])
         except ValueError:
             continue
         if start <= traded <= today:
             window.append(trade)
-    buy_value = sum(float(trade["value"]) for trade in window if trade.get("type") == "buy" and isinstance(trade.get("value"), (int, float)))
-    sell_value = sum(float(trade["value"]) for trade in window if trade.get("type") == "sell" and isinstance(trade.get("value"), (int, float)))
-    buys = sum(1 for trade in window if trade.get("type") == "buy")
-    sells = sum(1 for trade in window if trade.get("type") == "sell")
-    valued = any(isinstance(trade.get("value"), (int, float)) for trade in window if trade.get("type") in {"buy", "sell"})
-    net = buy_value - sell_value if valued else None
+    market = [trade for trade in window if trade.get("type") in {"buy", "sell"}]
+    complete = all(isinstance(trade.get("value"), (int, float)) and not isinstance(trade.get("value"), bool) for trade in market)
+    buy_value = sum(float(trade["value"]) for trade in market if trade.get("type") == "buy" and isinstance(trade.get("value"), (int, float)))
+    sell_value = sum(float(trade["value"]) for trade in market if trade.get("type") == "sell" and isinstance(trade.get("value"), (int, float)))
+    buys = sum(1 for trade in market if trade.get("type") == "buy")
+    sells = sum(1 for trade in market if trade.get("type") == "sell")
+    net = buy_value - sell_value if complete and market else None
     if buys <= 0:
         buying = False
     elif sells == 0:
@@ -479,27 +541,37 @@ def form4_xml_name(names: list[str], primary: str) -> str:
     return plain[0] if plain else primary
 
 
-def fetch_us_insider_trades(ticker: str, getter=None, today: date | None = None) -> dict:
+def load_sec_cik_map(getter=None) -> dict[str, str]:
+    """SEC ticker to CIK, loaded once and shared across a watchlist."""
+    get = getter or _sec_get
+    raw = json.loads(get("https://www.sec.gov/files/company_tickers.json"))
+    mapping: dict[str, str] = {}
+    if isinstance(raw, dict):
+        for row in raw.values():
+            if isinstance(row, dict) and row.get("ticker") and row.get("cik_str"):
+                mapping[str(row["ticker"]).upper().replace(".", "-")] = str(row["cik_str"])
+    return mapping
+
+
+def fetch_us_insider_trades(ticker: str, getter=None, today: date | None = None, cik_map: dict | None = None) -> dict:
     """Recent Form 4 transactions for a US ticker, or an unavailable result.
 
     ``getter`` maps a URL to a response body in tests. Live calls use the
-    SEC company ticker list and the submissions JSON.
+    SEC company ticker list and the submissions JSON. ``cik_map`` avoids
+    downloading that list once per watchlist row. Form 4/A amendments are
+    read and replace the original rows they restate.
     """
-    symbol = (ticker or "").strip().upper()
-    if not re.fullmatch(r"[A-Z]{1,5}", symbol):
+    symbol = sec_symbol(ticker)
+    if symbol is None:
         return {"available": False, "reason": "not-us", "trades": [], "summary": insider_summary([], today or date.today())}
     get = getter or _sec_get
     as_of = today or date.today()
-    try:
-        raw = json.loads(get("https://www.sec.gov/files/company_tickers.json"))
-    except Exception:
-        return {"available": False, "reason": "lookup-failed", "trades": [], "summary": insider_summary([], as_of)}
-    cik = None
-    if isinstance(raw, dict):
-        for row in raw.values():
-            if isinstance(row, dict) and str(row.get("ticker") or "").upper() == symbol:
-                cik = str(row.get("cik_str") or "")
-                break
+    if cik_map is None:
+        try:
+            cik_map = load_sec_cik_map(get)
+        except Exception:
+            return {"available": False, "reason": "lookup-failed", "trades": [], "summary": insider_summary([], as_of)}
+    cik = str((cik_map or {}).get(symbol) or "")
     if not cik:
         return {"available": False, "reason": "no-cik", "trades": [], "summary": insider_summary([], as_of)}
     cik_padded = cik.zfill(10)
@@ -515,7 +587,7 @@ def fetch_us_insider_trades(ticker: str, getter=None, today: date | None = None)
     trades: list[dict] = []
     fetched = 0
     for index, form in enumerate(forms):
-        if str(form).strip() != "4" or index >= len(accessions) or index >= len(documents):
+        if not is_form4(str(form)) or index >= len(accessions) or index >= len(documents):
             continue
         filed_at = str(filed[index]) if index < len(filed) else ""
         try:
@@ -537,11 +609,37 @@ def fetch_us_insider_trades(ticker: str, getter=None, today: date | None = None)
             xml_text = get(f"{folder}/{document}")
         except Exception:
             continue
-        trades.extend(parse_form4(xml_text, filed_at))
+        trades.extend(parse_form4(xml_text, filed_at, amended=str(form).strip().upper() == "4/A", accession=accession))
         fetched += 1
-        if fetched >= 6:
+        if fetched >= 8:
             break
     return {"available": True, "reason": "", "trades": trades, "summary": insider_summary(trades, as_of)}
+
+
+def fetch_insider_many(tickers: tuple[str, ...] | list[str], getter=None, today: date | None = None, cik_map: dict | None = None) -> dict[str, dict]:
+    """Form 4 results for several tickers, sharing one CIK list.
+
+    Live calls fetch different companies at the same time. A test getter
+    stays in order, one company after another.
+    """
+    symbols = [ticker for ticker in tickers if sec_symbol(str(ticker))]
+    if not symbols:
+        return {}
+    get = getter or _sec_get
+    as_of = today or date.today()
+    if cik_map is None:
+        try:
+            cik_map = load_sec_cik_map(get)
+        except Exception:
+            cik_map = {}
+
+    def one(ticker: str) -> tuple[str, dict]:
+        return ticker, fetch_us_insider_trades(ticker, getter=get, today=as_of, cik_map=cik_map)
+
+    if getter is not None or len(symbols) == 1:
+        return dict(one(ticker) for ticker in symbols)
+    with ThreadPoolExecutor(max_workers=min(6, len(symbols))) as pool:
+        return dict(pool.map(one, symbols))
 
 
 def fetch_bluesky_posts(query: str, getter=None) -> dict:

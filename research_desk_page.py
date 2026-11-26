@@ -63,9 +63,12 @@ import streamlit as st
 
 from macro_desk_insights import (
     fetch_bluesky_posts,
+    fetch_insider_many,
     fetch_us_insider_trades,
+    load_sec_cik_map,
     parse_grok_import,
     seasonality_from_candles,
+    sec_symbol,
     sentiment_view,
 )
 from research_desk_quotes import (
@@ -864,10 +867,22 @@ def cached_seasonality(symbol: str, as_of: str) -> dict:
     return seasonality_from_candles(candles, date.fromisoformat(as_of))
 
 
+@st.cache_data(ttl=86400, show_spinner=False)
+def cached_cik_map() -> dict:
+    """SEC ticker list, shared by every insider lookup on this app."""
+    return load_sec_cik_map()
+
+
 @st.cache_data(ttl=21600, show_spinner=False)
 def cached_insider(ticker: str, as_of: str) -> dict:
     """Form 4 filings for one US ticker, cached for six hours."""
-    return fetch_us_insider_trades(ticker, today=date.fromisoformat(as_of))
+    return fetch_us_insider_trades(ticker, today=date.fromisoformat(as_of), cik_map=cached_cik_map())
+
+
+@st.cache_data(ttl=21600, show_spinner=False)
+def cached_insider_batch(tickers: tuple[str, ...], as_of: str) -> dict:
+    """Form 4 flags for the whole watchlist, one shared SEC ticker list."""
+    return fetch_insider_many(tickers, today=date.fromisoformat(as_of), cik_map=cached_cik_map())
 
 
 @st.cache_data(ttl=1800, show_spinner=False)
@@ -1256,6 +1271,11 @@ def _render_watchlist() -> None:
         return
     rows = [_watchlist_row(snapshot) for snapshot in added.values()]
     rows.sort(key=lambda row: str(row.get("ticker") or ""))
+    us_tickers = tuple(sorted({str(row.get("ticker") or "") for row in rows if sec_symbol(str(row.get("ticker") or ""))}))
+    try:
+        insider_by_ticker = cached_insider_batch(us_tickers, _london_today().isoformat()) if us_tickers else {}
+    except Exception:
+        insider_by_ticker = {}
     header = "<tr><th>Stock</th><th>Price</th><th>Analyst target</th><th>50MA</th><th>200MA</th><th>Weekly</th><th>Daily</th><th>Fwd P/E</th><th>Sentiment</th><th></th></tr>"
     body_rows: list[str] = []
     for row in rows:
@@ -1291,13 +1311,9 @@ def _render_watchlist() -> None:
                 arrow = "▲" if sentiment_view_row["change"] >= 0 else "▼"
                 sentiment_cell += f" {arrow} {abs(sentiment_view_row['change']):.0f}"
         buying = ""
-        if re.fullmatch(r"[A-Z]{1,5}", ticker):
-            try:
-                filing = cached_insider(ticker, _london_today().isoformat())
-                if (filing.get("summary") or {}).get("insider_buying"):
-                    buying = "<br><span class='md-up'>Insider buying</span>"
-            except Exception:
-                buying = ""
+        filing = insider_by_ticker.get(ticker) or {}
+        if (filing.get("summary") or {}).get("insider_buying"):
+            buying = "<br><span class='md-up'>Insider buying</span>"
         stock_href = _link_with_theme("stock=" + urllib.parse.quote(ticker))
         body_rows.append(
             f"<tr><td><a href='{stock_href}' target='_self'><strong>{html.escape(ticker)}</strong></a><br>"
@@ -1401,7 +1417,7 @@ def _above_pill(value: bool | None, label: str) -> str:
 def _render_insider_block(ticker: str) -> None:
     st.markdown("### Insider transactions")
     st.caption("Last 30 days. US listings use SEC Form 4. An open-market buy is code P. Awards and option exercises stay marked other. The trade date and the filing date are both shown.")
-    if not re.fullmatch(r"[A-Z]{1,5}", ticker):
+    if sec_symbol(ticker) is None:
         st.caption("Director dealings for this listing are not connected. US stocks are the ones read from SEC Form 4.")
         return
     try:
@@ -1450,7 +1466,7 @@ def _render_insider_block(ticker: str) -> None:
 
 def _render_government_block(ticker: str) -> None:
     st.markdown("### Government officials’ trades")
-    if re.fullmatch(r"[A-Z]{1,5}", ticker):
+    if sec_symbol(ticker) is not None:
         st.caption("US officials’ trades are disclosed in value ranges, often days to weeks after the trade. No filings feed is connected, so this table stays empty rather than showing sample names.")
         return
     st.caption("US officials’ trades are only disclosed for US-listed stocks. Other countries publish interests differently, and this desk does not show those as trades.")

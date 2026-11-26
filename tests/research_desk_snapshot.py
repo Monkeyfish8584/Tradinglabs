@@ -425,6 +425,37 @@ def test_form4_keeps_open_market_buys_separate_from_awards() -> None:
     assert summary["net_value"] == 1000
 
 
+def test_insider_net_stays_unknown_until_every_trade_has_a_price() -> None:
+    from macro_desk_insights import insider_summary, is_form4, sec_symbol
+
+    trades = [
+        {"person": "A", "type": "sell", "traded_at": "2026-11-20", "value": 100, "filed_at": "2026-11-21"},
+        {"person": "A", "type": "buy", "traded_at": "2026-11-18", "value": None, "filed_at": "2026-11-19"},
+    ]
+    summary = insider_summary(trades, date(2026, 11, 26))
+    assert summary["net_value"] is None
+    assert summary["buys"] == 1 and summary["sells"] == 1
+    assert summary["insider_buying"] is False
+    assert sec_symbol("BRK.B") == "BRK-B"
+    assert sec_symbol("brk-b") == "BRK-B"
+    assert sec_symbol("SAP.DE") is None
+    assert sec_symbol("^GSPC") is None
+    assert is_form4("4/A") and is_form4("4")
+    assert not is_form4("8-K")
+
+
+def test_form4_amendment_replaces_the_original_rows() -> None:
+    from macro_desk_insights import insider_summary
+
+    original = {"person": "Ada Lovelace", "type": "sell", "traded_at": "2026-11-16", "filed_at": "2026-11-18", "value": 1000, "amended": False, "period": "2026-11-16"}
+    extra = {"person": "Ada Lovelace", "type": "sell", "traded_at": "2026-11-15", "filed_at": "2026-11-18", "value": 400, "amended": False, "period": "2026-11-16"}
+    amended = {"person": "Ada Lovelace", "type": "sell", "traded_at": "2026-11-16", "filed_at": "2026-11-20", "value": 50, "amended": True, "period": "2026-11-16"}
+    later = {"person": "Ada Lovelace", "type": "buy", "traded_at": "2026-11-22", "filed_at": "2026-11-24", "value": 10, "amended": False, "period": "2026-11-22"}
+    summary = insider_summary([original, extra, amended, later], date(2026, 11, 26))
+    assert sorted(trade["value"] for trade in summary["trades"]) == [10, 50]
+    assert summary["net_value"] == -40
+
+
 if __name__ == "__main__":
     test_macro_indices_are_five_in_spec_order()
     test_ema_trend_bullish_when_above_rising_ema()
@@ -448,4 +479,6 @@ if __name__ == "__main__":
     test_sentiment_score_uses_the_published_weights_and_a_minimum()
     test_seasonality_uses_published_closes_only()
     test_form4_keeps_open_market_buys_separate_from_awards()
+    test_insider_net_stays_unknown_until_every_trade_has_a_price()
+    test_form4_amendment_replaces_the_original_rows()
     print("Macro Desk checks passed.")
