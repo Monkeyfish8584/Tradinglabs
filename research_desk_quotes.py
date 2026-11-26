@@ -718,3 +718,53 @@ def fetch_red_folder_events(
         "available": feeds_read > 0,
         "partial": 0 < feeds_read < len(FF_CALENDAR_URLS),
     }
+
+
+# --- Macro Desk trend helpers (spec section 4) ---------------------------
+# Trend: Bullish if the latest close is above the 50-period EMA and the
+# 50 EMA is rising; otherwise Bearish. Unavailable when there are not
+# enough closes to form the EMA. These are pure functions, easy to change
+# in one place if the user prefers market-structure trends instead.
+
+def ema_series(values: list[float], period: int) -> list[float] | None:
+    """Exponential moving average series, seeded with the SMA of the first ``period`` values."""
+    if period <= 0 or len(values) < period:
+        return None
+    multiplier = 2 / (period + 1)
+    seed = sum(values[:period]) / period
+    series = [seed]
+    for value in values[period:]:
+        series.append((value - series[-1]) * multiplier + series[-1])
+    return series
+
+
+def trend_from_closes(closes: list[float], period: int = 50) -> str | None:
+    """EMA trend for one close series: Bullish / Bearish / None (unavailable)."""
+    finite = [float(c) for c in closes if isinstance(c, (int, float)) and not isinstance(c, bool) and math.isfinite(float(c))]
+    if len(finite) < period + 1:
+        return None
+    series = ema_series(finite, period)
+    if series is None or len(series) < 2:
+        return None
+    latest_ema, previous_ema = series[-1], series[-2]
+    if finite[-1] > latest_ema and latest_ema > previous_ema:
+        return "Bullish"
+    return "Bearish"
+
+
+def weekly_closes_from_daily(dates: list[str], closes: list[float]) -> list[float]:
+    """Last close per ISO week, from daily closes with ISO date strings."""
+    weekly: list[float] = []
+    current_week: tuple[int, int] | None = None
+    for day, close in zip(dates, closes):
+        try:
+            parsed = datetime.fromisoformat(str(day)).date()
+        except ValueError:
+            continue
+        week = parsed.isocalendar()[:2]
+        if week != current_week:
+            current_week = week
+            weekly.append(float(close))
+        else:
+            weekly[-1] = float(close)
+    return weekly
