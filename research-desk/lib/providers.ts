@@ -2,7 +2,7 @@ import type { Snapshot } from "./model";
 const UA = "Mozilla/5.0 (compatible; ResearchDesk/1.0)";
 import {numberValue,tableRows,textOnly} from "./parsing.ts";
 export {numberValue,tableRows,textOnly} from "./parsing.ts";
-import {parseProfile,parseQuarterly,parseAnnual,parseHeadlines} from "./research-data.ts";
+import {parseProfile,parseQuarterly,parseAnnual,parseHeadlines,parseInsider} from "./research-data.ts";
 export function parseStatistics(html: string): Partial<Snapshot> {
   const values = new Map(tableRows(html).filter(r => r.length === 2).map(r => [r[0].text.trim(), r[1]]));
   const val = (...labels: string[]) => { const c = labels.map(l => values.get(l)).find(Boolean); return numberValue(c?.raw.match(/title="([^"]+)"/)?.[1] ?? c?.text); };
@@ -53,6 +53,15 @@ async function fetchText(url: string): Promise<string> {
   if (body.length < 100) throw new Error("Provider returned an incomplete response");
   return body;
 }
+
+export async function searchSymbols(q:string):Promise<{symbol:string;name:string;exchange?:string;type?:string}[]>{
+  const url=`https://query1.finance.yahoo.com/v1/finance/search?q=${encodeURIComponent(q)}&quotesCount=8&newsCount=0`;
+  const r=await fetch(url,{headers:{"User-Agent":UA,Accept:"application/json"},signal:AbortSignal.timeout(16000)});
+  if(!r.ok)throw new Error(r.status===429?"Provider rate limit; try again later":`Provider returned HTTP ${r.status}`);
+  const data:any=await r.json();
+  return ((data?.quotes||[]) as any[]).filter(x=>x?.symbol).map(x=>({symbol:String(x.symbol).toUpperCase(),name:x.shortname||x.longname||String(x.symbol),exchange:x.exchange||x.exchDisp,type:x.quoteType||x.type})).slice(0,8);
+}
+
 export async function refreshSnapshot(ticker: string, previous?: Snapshot): Promise<Snapshot> {
   const now = new Date().toISOString();
   const foreign=ticker.match(/^(.+)\.(DE|MC|PA)$/),market:Record<string,string>={DE:'etr',MC:'bme',PA:'epa'};
@@ -74,11 +83,11 @@ export async function refreshSnapshot(ticker: string, previous?: Snapshot): Prom
     }
   };
   await Promise.all([
-    source("quote", "Yahoo Finance", `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(ticker)}?interval=1d&range=1y`, body => {
+    source("quote", "Yahoo Finance", `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(ticker)}?interval=1d&range=5y`, body => {
       const c = JSON.parse(body).chart?.result?.[0];
       if (!c || !Number.isFinite(c.meta?.regularMarketPrice)) throw new Error("Ticker not found or quote unavailable");
       const m = c.meta, q = c.indicators.quote[0];
-      const points = (c.timestamp || []).map((t: number, i: number) => ({ date: new Date(t * 1000).toISOString().slice(0,10), close: q.close[i], high: Number.isFinite(q.high?.[i])?q.high[i]:q.close[i], low:Number.isFinite(q.low?.[i])?q.low[i]:q.close[i], volume: q.volume[i] })).filter((p: any) => Number.isFinite(p.close));
+      const points = (c.timestamp || []).map((t: number, i: number) => ({ date: new Date(t * 1000).toISOString().slice(0,10), open: q.open?.[i], close: q.close[i], high: Number.isFinite(q.high?.[i])?q.high[i]:q.close[i], low:Number.isFinite(q.low?.[i])?q.low[i]:q.close[i], volume: q.volume[i] })).filter((p: any) => Number.isFinite(p.close));
       const avg = points.slice(-21,-1).map((p: any) => p.volume).filter(Number.isFinite);
       const averageVolume = avg.length >= 10 ? avg.reduce((a: number,b: number) => a+b,0)/avg.length : undefined;
       const prevClose = points.length > 1 ? points.at(-2).close : undefined;
@@ -97,8 +106,9 @@ export async function refreshSnapshot(ticker: string, previous?: Snapshot): Prom
       source("quarterly", "Stock Analysis · quarterly financials", `${equityBase}/financials/?p=quarterly`, parseQuarterly),
       source("annual", "Stock Analysis · annual financials", `${equityBase}/financials/`, parseAnnual),
       source("news", "Stock Analysis · headline index", `${equityBase}/`, parseHeadlines),
+      source("insider", "Stock Analysis · insider trades", `${equityBase}/insider-trading/`, parseInsider),
     ]),
-    source("benchmark", "Yahoo Finance · SPY benchmark", "https://query1.finance.yahoo.com/v8/finance/chart/SPY?interval=1d&range=1y", body=>{
+    source("benchmark", "Yahoo Finance · SPY benchmark", "https://query1.finance.yahoo.com/v8/finance/chart/SPY?interval=1d&range=5y", body=>{
       const c=JSON.parse(body).chart?.result?.[0];if(!c||!Number.isFinite(c.meta?.regularMarketPrice))throw new Error("Market benchmark unavailable");
       const points=(c.timestamp||[]).map((t:number,i:number)=>({date:new Date(t*1000).toISOString().slice(0,10),close:c.indicators.quote[0].close[i]})).filter((p:any)=>Number.isFinite(p.close));
       return {benchmark:{symbol:"SPY",price:c.meta.regularMarketPrice,closes:points.map((p:any)=>p.close),dates:points.map((p:any)=>p.date),quoteAt:c.meta.regularMarketTime?new Date(c.meta.regularMarketTime*1000).toISOString():undefined}};
@@ -112,3 +122,4 @@ export async function refreshSnapshot(ticker: string, previous?: Snapshot): Prom
   }
   return out;
 }
+

@@ -10,7 +10,9 @@ export type Snapshot = {
   revenue?: number; freeCashFlow?: number; cash?: number; totalDebt?: number; shareChangeYoY?: number; institutionalPct?: number;
   latestQuarter?: string; quarterEPS?: number; priorYearQuarterEPS?: number; quarterRevenueGrowth?: number; quarterEPSGrowth?: number;
   annualEPS?: {period:string;eps:number|null}[]; financialCurrency?: string;
-  priceHistory?: {date:string;close:number;high:number;low:number;volume:number}[]; sessionComplete?: boolean;
+  priceHistory?: {date:string;open?:number;close:number;high:number;low:number;volume:number}[]; sessionComplete?: boolean;
+  insiderTrades?: {date:string;insider:string;role?:string;type:'buy'|'sell'|'other';shares?:number;price?:number;value?:number;sourceUrl?:string}[];
+  congressTrades?: {date:string;politician:string;chamber?:string;type:'buy'|'sell'|'other';amountRange?:string;price?:number;sourceUrl?:string}[];
   benchmark?: {symbol:string;price:number;closes:number[];dates:string[];quoteAt?:string};
   headlines?: {title:string;url:string;date?:string}[];
   sources: Record<string, SourceStatus>; attemptedAt?: string;
@@ -25,7 +27,8 @@ export type Criterion = {letter:string;name:string;status:"pass"|"partial"|"fail
 export type Research = {
   version:number; generatedAt:string; quoteAt?:string; themes:string[]; title:string; summary:string; styleFit:string;
   bullCase:string[]; bearCase:string[]; catalysts:string[]; invalidation:string[];
-  priceCommentary:string[]; technicals:{trend:string;sma20?:number;sma50?:number;sma200?:number;return1m?:number;return3m?:number;return1y?:number;rsi14?:number;support?:number;resistance?:number;relativeReturn?:number};
+  priceCommentary:string[]; technicals:{trend:string;sma20?:number;sma50?:number;sma200?:number;return1m?:number;return3m?:number;return1y?:number;return5y?:number;rsi14?:number;support?:number;resistance?:number;relativeReturn?:number};
+  radar?: {axis:string;score:number|null;note:string}[];
   canslim:{criteria:Criterion[];passes:number;partial:number;fails:number;unknown:number;verdict:string;notApplicable?:boolean};
   limitations:string[];
 };
@@ -51,3 +54,4 @@ export function squeezeChecks(s: Snapshot) {
   return data.map(c => ({ ...c, known: c.value != null, passed: c.value != null && c.test(c.value) }));
 }
 export function validTicker(t: unknown): t is string { return typeof t === "string" && /^[A-Z0-9][A-Z0-9.^=-]{0,14}$/.test(t); }
+

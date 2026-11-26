@@ -64,3 +64,25 @@ export function parseHeadlines(html:string):Partial<Snapshot>{
   }
   return {headlines};
 }
+
+
+export function parseInsider(html:string):Partial<Snapshot>{
+  const rows=tableRows(html);
+  const trades:NonNullable<Snapshot['insiderTrades']>=[];
+  for(const r of rows){
+    const cells=r.map(c=>c.text.trim());
+    if(cells.length<4)continue;
+    const date=cells[0];
+    if(!/^\d{4}-\d\d-\d\d$/.test(date))continue;
+    const typeRaw=(cells[2]||cells[1]||'').toLowerCase();
+    const type=/buy|purchase/.test(typeRaw)?'buy':/sell|sale/.test(typeRaw)?'sell':'other';
+    const nums=cells.map(c=>numberValue(c)).filter((n):n is number=>n!=null);
+    // Heuristic table layout: date, insider, transaction, shares, price, value.
+    const shares=numberValue(cells[3]), price=numberValue(cells[4]), value=numberValue(cells[5]);
+    if(!shares&&!price&&!value)continue;
+    trades.push({date,insider:cells[1]||'Insider',type,shares,price,value});
+    if(trades.length>=10)break;
+  }
+  if(!trades.length)throw new Error('Insider trades unavailable for this ticker');
+  return {insiderTrades:trades};
+}
