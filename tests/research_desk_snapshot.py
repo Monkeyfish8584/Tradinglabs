@@ -20,7 +20,9 @@ from datetime import date, datetime, timedelta, timezone
 from research_desk_page import (
     EVENT_INDEX_MAP,
     MACRO_INDICES,
+    MACRO_THEME_CSS,
     TREND_EMA_PERIOD,
+    _macro_css,
     affected_indices,
     breadth_summary,
     calendar_days,
@@ -155,6 +157,26 @@ def test_app_has_macro_desk_and_untouched_data_hub() -> None:
     assert "default=True" in source
     assert 'st.title("Validated Trading Edge Dashboard")' in source
     assert "DATA_DIR" in source and "data" in source.lower()
+
+
+def test_macro_theme_has_explicit_light_and_dark_palettes() -> None:
+    # Regression test for 2026-11-26: Light mode stayed dark because there
+    # was no explicit light theme — only a dark card style was injected.
+    # Both themes must now inject a full explicit palette, light first.
+    assert set(MACRO_THEME_CSS) == {"Light", "Dark"}
+    light = MACRO_THEME_CSS["Light"]
+    dark = MACRO_THEME_CSS["Dark"]
+    assert light != dark
+    assert "color-scheme: light" in light
+    assert "color-scheme: dark" in dark
+    # Light is genuinely light: pale page background, white cards, dark text.
+    assert "#f8fafc" in light and "#ffffff" in light and "#111827" in light
+    # Dark is genuinely dark: dark page background, dark cards, light text.
+    assert "#0f172a" in dark and "#1e293b" in dark and "#f1f5f9" in dark
+    # The combined CSS is base + chosen theme, theme last so it wins.
+    assert _macro_css("Light").endswith(light)
+    assert _macro_css("Dark").endswith(dark)
+    assert _macro_css() == _macro_css("Light")
 
 
 def test_parse_headlines_caps_at_five_and_truncates_titles() -> None:
