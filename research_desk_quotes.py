@@ -2,7 +2,8 @@
 
 Yahoo Finance supplies the quote and daily closes. Stock Analysis supplies the
 valuation and short-interest statistics when that page publishes them. A missing
-field stays missing. Nothing here is estimated.
+field stays missing. Nothing here is estimated. It also reads Forex Factory's
+free weekly calendar JSON for high-impact (red-folder) events.
 """
 
 from __future__ import annotations
@@ -14,7 +15,7 @@ import re
 import urllib.error
 import urllib.parse
 import urllib.request
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 UA = "Mozilla/5.0 (compatible; ResearchDesk/1.0)"
 TICKER_RE = re.compile(r"^[A-Z0-9^][A-Z0-9.^=-]{0,14}$")
@@ -608,3 +609,112 @@ def fetch_new_snapshot(raw: str, getter=None) -> dict:
     if isinstance(volume, (int, float)) and isinstance(average, (int, float)) and not isinstance(volume, bool) and average:
         snapshot["relativeVolume"] = volume / average
     return snapshot
+
+
+# --- Red-folder (high-impact) economic calendar ---------------------------
+# Forex Factory's free, keyless weekly calendar JSON, served from its
+# faireconomy CDN — the "red folder" calendar traders mean by red-folder
+# news. Two feeds cover this week (Sunday–Saturday) and next week, so the
+# next 7 days are covered even late in the week; a feed that fails is
+# skipped rather than failing the whole calendar. Times in the feed carry
+# a US Eastern offset. The feed is rate-limited (roughly 2 downloads per
+# 5 minutes), so callers should cache the result — the page caches it
+# for an hour.
+FF_CALENDAR_URLS: tuple[str, str] = (
+    "https://nfs.faireconomy.media/ff_calendar_thisweek.json",
+    "https://nfs.faireconomy.media/ff_calendar_nextweek.json",
+)
+FF_CALENDAR_SOURCE = "Forex Factory economic calendar"
+
+
+def parse_ff_calendar(payload: object) -> list[dict]:
+    """High-impact events from a Forex Factory calendar JSON payload.
+
+    Returns ``{"title", "country", "date", "impact", "forecast",
+    "previous", "actual"}`` with ``date`` an aware datetime and ``impact``
+    kept as published. Only ``impact == "High"`` events are returned —
+    the red folder. Anything unreadable is skipped, never invented.
+    """
+    events: list[dict] = []
+    if not isinstance(payload, list):
+        return []
+    for item in payload:
+        if not isinstance(item, dict):
+            continue
+        if str(item.get("impact") or "").strip() != "High":
+            continue
+        title = str(item.get("title") or "").strip()
+        country = str(item.get("country") or "").strip().upper()
+        raw_date = item.get("date")
+        if not title or not country or not isinstance(raw_date, str):
+            continue
+        try:
+            when = datetime.fromisoformat(raw_date.strip())
+        except ValueError:
+            continue
+        if when.tzinfo is None:
+            when = when.replace(tzinfo=timezone.utc)
+        events.append(
+            {
+                "title": title,
+                "country": country,
+                "date": when,
+                "impact": "High",
+                "forecast": str(item.get("forecast") or "").strip(),
+                "previous": str(item.get("previous") or "").strip(),
+                "actual": str(item.get("actual") or "").strip(),
+            }
+        )
+    return events
+
+
+def fetch_red_folder_events(
+    currencies: tuple[str, ...] | None = None,
+    days_ahead: int = 7,
+    getter=None,
+    now: datetime | None = None,
+) -> dict:
+    """High-impact (red-folder) events in the next ``days_ahead`` days.
+
+    Returns ``{"events", "available", "partial"}``: ``events`` sorted by
+    date, each as in :func:`parse_ff_calendar`; ``available`` is False
+    when neither calendar feed could be read; ``partial`` is True when
+    only one of the two weekly feeds could be read, so the window may
+    end before ``days_ahead``. ``currencies`` limits the result to those
+    currency codes (``None`` keeps them all). Never raises: a failed
+    feed is an honest empty/partial result, not fabricated events.
+    """
+    get = getter or fetch_text
+    moment = now or datetime.now(timezone.utc)
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=timezone.utc)
+    end = moment + timedelta(days=days_ahead)
+    wanted = {
+        code.strip().upper() for code in (currencies or ()) if code and code.strip()
+    }
+    events: list[dict] = []
+    feeds_read = 0
+    for url in FF_CALENDAR_URLS:
+        try:
+            payload = json.loads(get(url))
+        except Exception:
+            continue
+        feeds_read += 1
+        events.extend(parse_ff_calendar(payload))
+    seen: set[tuple[str, str, str]] = set()
+    upcoming: list[dict] = []
+    for event in sorted(events, key=lambda item: item["date"]):
+        if wanted and event["country"] not in wanted:
+            continue
+        if not moment <= event["date"] <= end:
+            continue
+        key = (event["date"].isoformat(), event["country"], event["title"])
+        if key in seen:
+            continue
+        seen.add(key)
+        upcoming.append(event)
+    return {
+        "events": upcoming,
+        "available": feeds_read > 0,
+        "partial": 0 < feeds_read < len(FF_CALENDAR_URLS),
+    }
