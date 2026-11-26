@@ -9,7 +9,7 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
-from research_desk_page import render_research_desk
+from research_desk_page import render_macro_desk
 
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR / "data" / "uploads"
@@ -1488,13 +1488,13 @@ def main() -> None:
 
 def _run() -> None:
     # One Streamlit entrypoint serves both pages. Trading Edge stays the default
-    # page. Research Desk is a second page and does not replace this dashboard.
-    # Macro trends live only on the Research Desk page (render_research_desk
-    # calls render_macro_trends); they are not shown above Trading Edge.
+    # page. Macro Desk is a second page and does not replace this dashboard.
+    # The Macro Desk (render_macro_desk) replaced the old Research Desk;
+    # it is not shown above Trading Edge. The Data Hub in main() is untouched.
     st.set_page_config(page_title="Tradinglabs", layout="wide", initial_sidebar_state="expanded")
     trading_edge = st.Page(main, title="Trading Edge", url_path="trading-edge", default=True)
-    research_desk = st.Page(render_research_desk, title="Research Desk", url_path="research-desk")
-    st.navigation([trading_edge, research_desk]).run()
+    macro_desk = st.Page(render_macro_desk, title="Macro Desk", url_path="research-desk")
+    st.navigation([trading_edge, macro_desk]).run()
 
 
 if __name__ == "__main__":
