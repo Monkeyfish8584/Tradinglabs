@@ -1619,37 +1619,31 @@ def _render_watchlist() -> None:
     st.title("Research Desk")
     st.caption(
         "USAR, IBRX, ALMU, NVO, UUUU and SMR start from the seeded snapshots in research-desk/lib/bootstrap.json. "
-        "Add a ticker to fetch a quote from Yahoo Finance and valuation fields from Stock Analysis. "
+        "Add a ticker — by ticker or company name — to fetch a quote from Yahoo Finance and valuation fields from Stock Analysis. "
         "A figure stays blank when that source does not publish it. "
         "Names you add, and prices you refresh, stay on this running app until it restarts. "
         "They are not written back to the repo. "
         "Thesis text is the ticker playbook in research-desk/lib/research.ts."
     )
 
-    with st.form("add_ticker", clear_on_submit=True):
-        entered = st.text_input("Add a ticker", placeholder="AAPL")
-        add = st.form_submit_button("Add to watchlist")
-    if add:
-        _add_ticker(entered)
-
-    st.markdown("**Search by company name**")
-    company_query = st.text_input("Search by company name", placeholder="NVIDIA", key="desk_company_search")
-    if st.button("Search", key="desk_company_search_button"):
-        if not (company_query or "").strip():
-            st.error("Enter a company name to search.")
-        else:
-            with st.spinner(f"Searching for {company_query.strip()}…"):
-                try:
-                    st.session_state.desk_search_results = search_symbols(company_query.strip())
-                except Exception as exc:
-                    st.session_state.desk_search_results = []
-                    st.error(f"Company search failed: {exc}")
+    # One box for adding a ticker: type a ticker (AAPL) or a company name
+    # (NVIDIA) in the same input. There used to be two separate boxes here —
+    # "Add a ticker" and "Search by company name" — and Oliver asked for one.
+    # The "Search watchlist" box further down is untouched: it only filters
+    # the stocks already on the watchlist.
+    query = st.text_input(
+        "Add a ticker — search by ticker or company name",
+        placeholder="AAPL or NVIDIA",
+        key="desk_add_search",
+    )
+    if st.button("Search", key="desk_add_search_button"):
+        _run_add_search(query)
     search_results = st.session_state.get("desk_search_results") or []
     if search_results:
         options = [f"{result.get('symbol')} — {result.get('name')}" for result in search_results if result.get("symbol")]
         if options:
-            chosen = st.selectbox("Search results", options=options, key="desk_company_search_results")
-            if st.button("Add selected", key="desk_company_search_add"):
+            chosen = st.selectbox("Search results", options=options, key="desk_add_search_results")
+            if st.button("Add selected", key="desk_add_search_add"):
                 _add_ticker(str(chosen).split(" — ")[0])
     elif st.session_state.get("desk_search_results") is not None:
         st.caption("No companies matched that search.")
@@ -1804,6 +1798,49 @@ def _refresh_prices() -> None:
         else:
             st.warning("There are no stocks to refresh.")
     _remember_quotes()
+
+
+def _run_add_search(query: str) -> None:
+    """Search the single add box, then add or offer a match.
+
+    A known ticker typed on its own (AAPL) is added straight away when the
+    Yahoo symbol search returns it as an exact match. A company name
+    (NVIDIA) has no exact symbol, so its matches are shown in the results
+    list below the box for Oliver to pick from. If the search returns
+    nothing at all, a ticker-looking query falls back to the direct add
+    path, so a valid ticker still adds even when the search feed fails.
+    Results are kept in ``desk_search_results`` until the next search.
+    """
+    text = (query or "").strip()
+    if not text:
+        st.session_state.desk_search_results = None
+        st.error("Enter a ticker or a company name to search.")
+        return
+    with st.spinner(f"Searching for {text}…"):
+        try:
+            results = search_symbols(text)
+        except Exception as exc:
+            results = []
+            st.error(f"Search failed: {exc}")
+    exact = [result for result in results if str(result.get("symbol") or "").upper() == text.upper()]
+    if exact:
+        # A ticker on its own: add it directly, no extra click needed.
+        st.session_state.desk_search_results = None
+        _add_ticker(str(exact[0].get("symbol")))
+        return
+    if not results:
+        # No matches at all: a ticker-looking query still gets the direct
+        # add path (so a valid ticker adds even when the search feed fails);
+        # anything else just shows "no companies matched".
+        try:
+            normalize_ticker(text)
+        except QuoteError:
+            st.session_state.desk_search_results = []
+            return
+        st.session_state.desk_search_results = None
+        _add_ticker(text)
+        return
+    st.session_state.desk_search_results = results
 
 
 def _add_ticker(raw: str) -> None:

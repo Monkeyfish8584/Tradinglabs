@@ -807,6 +807,19 @@ def test_quote_cache_round_trips_theses() -> None:
     cache.unlink()
 
 
+def test_add_search_is_one_box() -> None:
+    """Adding a ticker is one box: ticker or company name, not two boxes."""
+    page = (ROOT / "research_desk_page.py").read_text(encoding="utf-8")
+    assert 'Add a ticker — search by ticker or company name' in page
+    assert 'st.text_input("Add a ticker"' not in page
+    assert 'st.text_input("Search by company name"' not in page
+    assert "desk_company_search" not in page
+    # The watchlist filter is a different box and must stay.
+    assert 'st.text_input("Search watchlist"' in page
+    assert "_run_add_search" in page
+    assert "search_symbols" in page
+
+
 def test_trading_edge_page_remains_the_default() -> None:
     source = (ROOT / "app.py").read_text(encoding="utf-8")
     assert 'st.title("Validated Trading Edge Dashboard")' in source
@@ -843,4 +856,5 @@ if __name__ == "__main__":
     test_snapshot_fetched_at_and_is_fresh()
     test_quote_cache_round_trips_theses()
     test_trading_edge_page_remains_the_default()
+    test_add_search_is_one_box()
     print("Research desk snapshot checks passed.")
