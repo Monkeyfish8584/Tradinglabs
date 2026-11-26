@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {parseAnnual,parseQuarterly,parseProfile,classifyBusiness} from '../lib/research-data.ts';
 import {composeResearch,canslim,technicals,sma,rsi} from '../lib/research.ts';
-import {effective} from '../lib/model.ts';
+import {effective,parseThesis,serializeThesis} from '../lib/model.ts';
 const table=(headers,rows)=>`<table><tr>${headers.map(h=>`<th>${h}</th>`).join('')}</tr>${rows.map(row=>`<tr>${row.map(c=>`<td>${c}</td>`).join('')}</tr>`).join('')}</table>`;
 test('quarterly earnings compare matching year-ago quarter; loss-to-profit does not create fake growth',()=>{
  const h=table(['Fiscal Quarter','Q2 2026','Q1 2026','Q4 2025','Q3 2025','Q2 2025'],[['Earnings Per Share EPS Growth','0.2','0.1','0.05','-0.1','-0.1'],['Revenue Growth','35%','30%','20%','10%','5%']]);
@@ -58,4 +58,16 @@ test('GBP history is not scored against unconverted USD SPY returns',()=>{
  const s={ticker:'FUND',name:'Fund',currency:'GBP',price:20,priceHistory:dates.map((date,i)=>({date,close:10+i/25,high:21,low:9,volume:1})),benchmark:{symbol:'SPY',price:20,closes:dates.map(()=>10),dates},sources:{}};
  assert.equal(technicals(s).relativeReturn,undefined);
  assert.ok(technicals({...s,currency:'USD'}).relativeReturn>0);
+});
+
+test('thesis box round-trips inside notes; a malformed block is never deleted',()=>{
+ const stored=serializeThesis('Uranium demand outruns supply.','Free-form notes\n\nMore notes');
+ assert.match(stored,/<!-- THESIS -->/);
+ const parsed=parseThesis(stored);
+ assert.equal(parsed.thesis,'Uranium demand outruns supply.');
+ assert.equal(parsed.rest,'Free-form notes\n\nMore notes');
+ assert.equal(serializeThesis('','Just notes'),'Just notes');
+ const broken=parseThesis('Keep me <!-- THESIS -->\nunterminated');
+ assert.equal(broken.thesis,'');
+ assert.match(broken.rest,/Keep me/);
 });
