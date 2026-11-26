@@ -148,6 +148,60 @@ def parse_forecast_html(html: str) -> dict:
     }
 
 
+_HEADLINE_RE = re.compile(
+    r'<h3\b[^>]*>\s*<a\b[^>]*href="([^"]+)"[^>]*>([\s\S]*?)</a>\s*</h3>([\s\S]*?)(?=<h3\b|$)',
+    flags=re.IGNORECASE,
+)
+_HEADLINE_DATE_RE = re.compile(r'title="(\d{4}-\d\d-\d\dT[^"<>]+|[A-Za-z]{3} \d{1,2}, \d{4}[^"<>]*)"')
+
+
+def parse_headlines(html: str) -> dict:
+    """Same headline split as research-desk/lib/research-data.ts ``parseHeadlines``."""
+    headlines: list[dict] = []
+    for match in _HEADLINE_RE.finditer(html):
+        words = _text_only(match.group(2)).split(" ")
+        title = " ".join(words[:20]) + ("…" if len(words) > 20 else "")
+        url = urllib.parse.urljoin("https://stockanalysis.com", match.group(1))
+        if not url.startswith("https://") or "transcripts" in url:
+            continue
+        date_match = _HEADLINE_DATE_RE.search(match.group(3))
+        headlines.append({"title": title, "url": url, "date": date_match.group(1) if date_match else None})
+        if len(headlines) >= 5:
+            break
+    return {"headlines": headlines}
+
+
+def parse_insider(html: str) -> dict:
+    """Same insider-trade rows as research-desk/lib/research-data.ts ``parseInsider``."""
+    trades: list[dict] = []
+    for row in table_rows(html):
+        cells = [cell["text"].strip() for cell in row]
+        if len(cells) < 4:
+            continue
+        date = cells[0]
+        if not re.fullmatch(r"\d{4}-\d\d-\d\d", date):
+            continue
+        type_raw = (cells[2] or cells[1] or "").lower()
+        if "buy" in type_raw or "purchase" in type_raw:
+            trade_type = "buy"
+        elif "sell" in type_raw or "sale" in type_raw:
+            trade_type = "sell"
+        else:
+            trade_type = "other"
+        # Heuristic table layout: date, insider, transaction, shares, price, value.
+        shares = number_value(cells[3])
+        price = number_value(cells[4]) if len(cells) > 4 else None
+        value = number_value(cells[5]) if len(cells) > 5 else None
+        if not shares and not price and not value:
+            continue
+        trades.append({"date": date, "insider": cells[1] or "Insider", "type": trade_type, "shares": shares, "price": price, "value": value})
+        if len(trades) >= 10:
+            break
+    if not trades:
+        raise RuntimeError("Insider trades unavailable for this ticker")
+    return {"insiderTrades": trades}
+
+
 def _finite(value: object) -> float | None:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
@@ -183,7 +237,7 @@ def parse_yahoo_chart(body: str, ticker: str) -> dict:
         volume = _finite(volumes[index] if index < len(volumes) else None)
         when = datetime.fromtimestamp(int(stamp), timezone.utc).date().isoformat()
         points.append({"date": when, "close": close, "high": high if high is not None else close, "low": low if low is not None else close, "volume": volume})
-    recent = points[-520:]
+    recent = points[-1300:]
     volume_window = [point["volume"] for point in points[-21:-1] if point["volume"] is not None]
     average_volume = sum(volume_window) / len(volume_window) if len(volume_window) >= 10 else None
     change = _finite(meta.get("regularMarketChangePercent"))
@@ -229,6 +283,88 @@ def fetch_text(url: str, timeout: int = 16) -> str:
     return body
 
 
+def search_symbols(query: str, getter=None) -> list[dict]:
+    """Company-name / symbol search via Yahoo's public symbol search.
+
+    Returns a list of ``{"symbol", "name", "exchange"}`` with upper-cased
+    symbols. Returns [] on any bad response and never raises.
+    """
+    text = (query or "").strip()
+    if not text:
+        return []
+    get = getter or fetch_text
+    url = f"https://query1.finance.yahoo.com/v1/finance/search?q={urllib.parse.quote(text)}&quotesCount=8&newsCount=0"
+    try:
+        payload = json.loads(get(url))
+    except Exception:
+        return []
+    if not isinstance(payload, dict):
+        return []
+    results: list[dict] = []
+    for quote in (payload.get("quotes") or [])[:8]:
+        if not isinstance(quote, dict):
+            continue
+        symbol = str(quote.get("symbol") or "").strip().upper()
+        if not symbol:
+            continue
+        name = quote.get("shortname") or quote.get("longname") or ""
+        exchange = quote.get("exchange") or quote.get("exchDisp") or ""
+        results.append({"symbol": symbol, "name": str(name), "exchange": str(exchange)})
+    return results
+
+
+def _rss_field(item: str, name: str) -> str:
+    """One RSS field value, with CDATA unwrapped and entities decoded."""
+    match = re.search(rf"<{name}\b[^>]*>([\s\S]*?)</{name}>", item, flags=re.IGNORECASE)
+    if not match:
+        return ""
+    text = match.group(1).strip()
+    text = re.sub(r"<!\[CDATA\[([\s\S]*?)\]\]>", r"\1", text)
+    for src, dst in (
+        ("&amp;", "&"),
+        ("&lt;", "<"),
+        ("&gt;", ">"),
+        ("&quot;", '"'),
+        ("&#39;", "'"),
+        ("&apos;", "'"),
+        ("&nbsp;", " "),
+    ):
+        text = text.replace(src, dst)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def fetch_news_rss(query: str, getter=None) -> list[dict]:
+    """Google News RSS headlines for a query, up to 5.
+
+    Returns a list of ``{"title", "url", "date"}``. Returns [] on failure
+    and never raises.
+    """
+    text = (query or "").strip()
+    if not text:
+        return []
+    get = getter or fetch_text
+    url = f"https://news.google.com/rss/search?q={urllib.parse.quote(text)}&hl=en-GB&gl=GB&ceid=GB:en"
+    try:
+        body = get(url)
+    except Exception:
+        return []
+    items: list[dict] = []
+    try:
+        for match in re.finditer(r"<item\b[^>]*>([\s\S]*?)</item>", body, flags=re.IGNORECASE):
+            item = match.group(1)
+            title = _rss_field(item, "title")
+            link = _rss_field(item, "link")
+            date = _rss_field(item, "pubDate")
+            if not title or not link:
+                continue
+            items.append({"title": title, "url": link, "date": date or None})
+            if len(items) >= 5:
+                break
+    except Exception:
+        return []
+    return items
+
+
 def _equity_base(ticker: str) -> str:
     foreign = re.fullmatch(r"(.+)\.(DE|MC|PA)", ticker)
     if foreign:
@@ -252,8 +388,61 @@ def _apply_source(snapshot: dict, key: str, name: str, url: str, parser, getter)
     snapshot["sources"][key] = {"name": name, "url": url, "fetchedAt": now}
 
 
-def yahoo_chart_url(ticker: str, span: str = "2y") -> str:
-    return f"https://query1.finance.yahoo.com/v8/finance/chart/{urllib.parse.quote(ticker)}?interval=1d&range={span}"
+def yahoo_chart_url(ticker: str, span: str = "5y", interval: str = "1d") -> str:
+    return f"https://query1.finance.yahoo.com/v8/finance/chart/{urllib.parse.quote(ticker)}?interval={interval}&range={span}"
+
+
+def _parse_yahoo_candles(body: str) -> list[dict]:
+    """Candles from a Yahoo chart payload: date/close/high/low, finite closes only."""
+    try:
+        payload = json.loads(body)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("Ticker not found or quote unavailable") from exc
+    result = (payload.get("chart") or {}).get("result") or []
+    chart = result[0] if result else None
+    if not chart:
+        raise RuntimeError("Ticker not found or quote unavailable")
+    quote = ((chart.get("indicators") or {}).get("quote") or [{}])[0]
+    closes_raw = quote.get("close") or []
+    highs = quote.get("high") or []
+    lows = quote.get("low") or []
+    candles: list[dict] = []
+    for index, stamp in enumerate(chart.get("timestamp") or []):
+        close = _finite(closes_raw[index] if index < len(closes_raw) else None)
+        if close is None:
+            continue
+        high = _finite(highs[index] if index < len(highs) else None)
+        low = _finite(lows[index] if index < len(lows) else None)
+        candles.append({
+            "date": datetime.fromtimestamp(int(stamp), timezone.utc).date().isoformat(),
+            "close": close,
+            "high": high if high is not None else close,
+            "low": low if low is not None else close,
+        })
+    candles.sort(key=lambda candle: candle["date"])
+    return candles
+
+
+def fetch_candles(symbol: str, interval: str = "1d", span: str = "5y", getter=None) -> list[dict]:
+    """Candles for one symbol, for the macro daily/weekly/4-hour trends.
+
+    Returns a list of ``{"date", "close", "high", "low"}`` sorted by date,
+    with finite closes only. Raises QuoteError when Yahoo does not return
+    a price, like ``fetch_trend_snapshot``.
+    """
+    ticker = normalize_ticker(symbol)
+    get = getter or fetch_text
+    url = yahoo_chart_url(ticker, span, interval)
+    try:
+        candles = _parse_yahoo_candles(get(url))
+    except Exception as exc:
+        message = str(exc).strip()
+        if message.startswith("Provider") or message.startswith("Feed"):
+            raise QuoteError(f"{ticker}: {message}") from exc
+        raise QuoteError(f"{ticker} did not return a price from Yahoo Finance.") from exc
+    if not candles:
+        raise QuoteError(f"{ticker} did not return a price from Yahoo Finance.")
+    return candles
 
 
 def fetch_trend_snapshot(raw: str, getter=None, span: str = "6mo") -> dict:
@@ -327,6 +516,8 @@ def fetch_new_snapshot(raw: str, getter=None) -> dict:
     base = _equity_base(ticker)
     _apply_source(snapshot, "stats", "Stock Analysis", f"{base}/statistics/", parse_statistics_html, get)
     _apply_source(snapshot, "forecast", "Stock Analysis · analyst consensus", f"{base}/forecast/", parse_forecast_html, get)
+    _apply_source(snapshot, "news", "Stock Analysis · news", f"{base}/news/", parse_headlines, get)
+    _apply_source(snapshot, "insider", "Stock Analysis · insider trading", f"{base}/insider-trading/", parse_insider, get)
     volume = snapshot.get("volume")
     average = snapshot.get("averageVolume")
     if isinstance(volume, (int, float)) and isinstance(average, (int, float)) and not isinstance(volume, bool) and average:
