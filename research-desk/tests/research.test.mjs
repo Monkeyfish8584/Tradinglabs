@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {parseAnnual,parseQuarterly,parseProfile,classifyBusiness} from '../lib/research-data.ts';
 import {composeResearch,canslim,technicals,sma,rsi} from '../lib/research.ts';
-import {effective} from '../lib/model.ts';
+import {effective,parseSpeculativeDraft,serializeSpeculativeDraft,EMPTY_SPECULATIVE_DRAFT} from '../lib/model.ts';
 const table=(headers,rows)=>`<table><tr>${headers.map(h=>`<th>${h}</th>`).join('')}</tr>${rows.map(row=>`<tr>${row.map(c=>`<td>${c}</td>`).join('')}</tr>`).join('')}</table>`;
 test('quarterly earnings compare matching year-ago quarter; loss-to-profit does not create fake growth',()=>{
  const h=table(['Fiscal Quarter','Q2 2026','Q1 2026','Q4 2025','Q3 2025','Q2 2025'],[['Earnings Per Share EPS Growth','0.2','0.1','0.05','-0.1','-0.1'],['Revenue Growth','35%','30%','20%','10%','5%']]);
@@ -58,4 +58,18 @@ test('GBP history is not scored against unconverted USD SPY returns',()=>{
  const s={ticker:'FUND',name:'Fund',currency:'GBP',price:20,priceHistory:dates.map((date,i)=>({date,close:10+i/25,high:21,low:9,volume:1})),benchmark:{symbol:'SPY',price:20,closes:dates.map(()=>10),dates},sources:{}};
  assert.equal(technicals(s).relativeReturn,undefined);
  assert.ok(technicals({...s,currency:'USD'}).relativeReturn>0);
+});
+
+test('speculative draft round-trips inside notes; a malformed block is never deleted',()=>{
+ const draft={idea:'Uranium demand outruns supply',hasToGoRight:'Restart approvals land',proveWrong:'Spot falls below $60',biggestRisk:'Dilution',catalyst:'Q3 earnings',museChallenge:'Check contract coverage first',museDetail:'Two of three producers guided flat output.'};
+ const stored=serializeSpeculativeDraft(draft,'Free-form notes\n\nMore notes');
+ assert.match(stored,/DRAFT-IT-TOGETHER/);
+ const parsed=parseSpeculativeDraft(stored);
+ assert.deepEqual(parsed.draft,draft);
+ assert.equal(parsed.rest,'Free-form notes\n\nMore notes');
+ assert.equal(serializeSpeculativeDraft(EMPTY_SPECULATIVE_DRAFT,'Just notes'),'Just notes');
+ const broken=parseSpeculativeDraft('Keep me <!-- DRAFT-IT-TOGETHER: SPECULATIVE THESIS -->\nnot json\n<!-- END DRAFT-IT-TOGETHER -->');
+ assert.deepEqual(broken.draft,EMPTY_SPECULATIVE_DRAFT);
+ assert.match(broken.rest,/Keep me/);
+ assert.match(broken.rest,/not json/);
 });
