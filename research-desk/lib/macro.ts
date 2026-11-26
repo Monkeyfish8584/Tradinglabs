@@ -18,10 +18,13 @@ export type Breadth = {
   index: string; label: string; asOf?: string; total: number; highs: number; lows: number;
   neither: number; unavailable: number; coverage: string; error?: string;
 };
+export type MacroSpiderAxis = { axis: "Technical" | "Sentiment" | "Fundamental"; score: number | null; note: string };
+export type MacroSpider = { axes: MacroSpiderAxis[]; verdict: string; verdictNote: string };
 export type MacroData = {
   fetchedAt: string; instruments: MacroInstrument[]; breadth: Breadth[];
-  breadthNote: string;
+  breadthNote: string; spider?: MacroSpider;
 };
+export type StockFundamental = { canslimPasses?: number; quarterEPSGrowth?: number; forwardPE?: number };
 
 export const MACRO_INSTRUMENTS: { id: string; label: string; symbol: string; kind: "index" | "fx" }[] = [
   { id: "us100", label: "US 100", symbol: "^NDX", kind: "index" },
@@ -175,4 +178,81 @@ export async function refreshMacro(): Promise<MacroData> {
     fetchedAt: new Date().toISOString(), instruments, breadth,
     breadthNote: "New high = price within 1% of its 52-week high; new low = within 1% of its 52-week low. Counts are from Yahoo batch quotes against Wikipedia constituent lists, as of the fetch time. The BofA Bull & Bear score is a proprietary Bank of America indicator and is not available in this desk — the breadth and trend read above is the desk's own equivalent, not a BofA score.",
   };
+}
+
+// ---------------------------------------------------------------------------
+// Macro spider diagram — Technical × Sentiment × Fundamental, 0–10 each.
+// Scoring rules from the BofA explainer guide (artifact
+// bofa-score-and-spider-diagram). The guide gives directional rules, not a
+// complete arithmetic specification ("~1 point per bullish timeframe,
+// scaled", "full/partial/zero"), so the point allocation below is the desk's
+// deterministic implementation of those rules, stated in full here and in
+// the UI. Sentiment is read backwards: a high score means crowded = caution,
+// not a buy signal.
+//   Technical (10): daily trend 4 + weekly trend 3 + 4-hour trend 1 + breadth 2.
+//     Each trend component is the share of the 7 tracked instruments that are
+//     Bullish on that timeframe, scaled to its points. Breadth is the average
+//     net breadth (highs − lows) / total across the four indices, mapped so
+//     net −0.20 → 0 and net +0.20 → 2. If net breadth is negative while the
+//     indices are up, Technical is capped at 6 (the guide's breadth cap).
+//   Sentiment (10): breadth crowdedness 5 + daily-trend unanimity 3 +
+//     weekly-trend unanimity 2. Breadth crowdedness is the average share of
+//     constituents near new highs, mapped 0 → 0 and 0.30 → 5. This is a
+//     breadth/trend proxy only: there is no put/call ratio or live BofA
+//     reading in this desk, and the guide's last reported BofA figure
+//     (~7.1, early Nov 2026) is a stale press snapshot, not live data, so
+//     it is not used as an input.
+//   Fundamental (10): averaged across the stocks on the desk (not the
+//     indices themselves). CANSLIM passes/7 × 5 + share of stocks with
+//     quarterly EPS growth ≥ 25% × 3 + share with forward P/E < 20 × 2.
+//     Cheap alone does not earn a high score without growth, per the guide.
+//   An axis with no usable inputs is null (Unavailable), never zero.
+export function computeMacroSpider(macro: MacroData, stocks: StockFundamental[]): MacroSpider {
+  const clamp = (n: number) => Math.max(0, Math.min(10, Math.round(n)));
+  const bullishShare = (tf: "weekly" | "daily" | "fourHour") => {
+    const xs = macro.instruments.filter(i => i[tf]);
+    return xs.length ? xs.filter(i => i[tf]!.label === "Bullish").length / xs.length : null;
+  };
+  const d = bullishShare("daily"), w = bullishShare("weekly"), h = bullishShare("fourHour");
+  const netBreadth = macro.breadth.length ? macro.breadth.filter(b => !b.error && b.total > 0).map(b => (b.highs - b.lows) / b.total) : [];
+  const net = netBreadth.length ? netBreadth.reduce((a, b) => a + b, 0) / netBreadth.length : null;
+  const nearHighs = macro.breadth.length ? macro.breadth.filter(b => !b.error && b.total > 0).map(b => b.highs / b.total) : [];
+  const crowded = nearHighs.length ? nearHighs.reduce((a, b) => a + b, 0) / nearHighs.length : null;
+  let technical: number | null = null;
+  if (d != null || w != null || h != null || net != null) {
+    technical = clamp((d ?? 0) * 4 + (w ?? 0) * 3 + (h ?? 0) * 1 + (net == null ? 0 : Math.max(0, Math.min(1, (net + 0.2) / 0.4)) * 2));
+    if (net != null && net < 0 && (d ?? 0) > 0.5 && technical > 6) technical = 6;
+  }
+  let sentiment: number | null = null;
+  if (crowded != null || d != null || w != null) {
+    sentiment = clamp((crowded == null ? 0 : Math.min(1, crowded / 0.3) * 5) + (d ?? 0) * 3 + (w ?? 0) * 2);
+  }
+  let fundamental: number | null = null;
+  if (stocks.length) {
+    const withCanslim = stocks.filter(s => s.canslimPasses != null);
+    const withGrowth = stocks.filter(s => s.quarterEPSGrowth != null);
+    const withPE = stocks.filter(s => s.forwardPE != null);
+    if (withCanslim.length || withGrowth.length || withPE.length) {
+      const canslimPart = withCanslim.length ? (withCanslim.reduce((a, s) => a + (s.canslimPasses ?? 0), 0) / withCanslim.length / 7) * 5 : 0;
+      const growthPart = withGrowth.length ? (withGrowth.filter(s => (s.quarterEPSGrowth ?? 0) >= 25).length / withGrowth.length) * 3 : 0;
+      const valuePart = withPE.length ? (withPE.filter(s => (s.forwardPE ?? 99) < 20).length / withPE.length) * 2 : 0;
+      fundamental = clamp(canslimPart + growthPart + valuePart);
+    }
+  }
+  const axes: MacroSpiderAxis[] = [
+    { axis: "Technical", score: technical, note: "Daily trend ×4, weekly ×3, 4-hour ×1, breadth ×2; capped at 6 if breadth is negative while indices rise." },
+    { axis: "Sentiment", score: sentiment, note: "Read backwards — high = crowded = caution. Breadth crowdedness ×5, daily unanimity ×3, weekly ×2. Proxy only: no put/call ratio or live BofA reading in this desk." },
+    { axis: "Fundamental", score: fundamental, note: "Averaged across stocks on the desk: CANSLIM passes ×5, quarterly EPS growth ≥25% ×3, forward P/E <20 ×2." },
+  ];
+  const [T, S, F] = [technical, sentiment, fundamental];
+  let verdict = "Mixed — check the axes below.";
+  let verdictNote = "No single shape dominates. Read the lowest axis first: that is where the setup is weakest.";
+  if (T != null && S != null && F != null) {
+    if (S >= 8 && F >= 6 && T >= 6) { verdict = "Crowded, not broken"; verdictNote = "Sentiment is high but fundamentals are decent and the trend is up. Everyone already likes it — expect sharp dips on any disappointment — but the underlying story looks intact. Picky entries, sensible size."; }
+    else if (T < 4 && F >= 6) { verdict = "Watchlist, not a short"; verdictNote = "Technically weak but fundamentally strong. Wait for the trend to turn rather than shorting a good story."; }
+    else if (T >= 7 && S >= 7 && F < 4) { verdict = "Momentum-bubble shape"; verdictNote = "Trend and crowd are hot, fundamentals are weak. Momentum can run, but there is little underneath it."; }
+    else if (T < 4 && S < 4 && F < 4) { verdict = "No reason to be here yet"; verdictNote = "All three axes are low. Nothing in the setup earns attention right now."; }
+    else if (T >= 5 && T <= 7 && S >= 5 && S <= 7 && F >= 5 && F <= 7) { verdict = "Healthy, well-rounded setup"; verdictNote = "A balanced triangle: trend, crowd and fundamentals are all in the middle of the range."; }
+  }
+  return { axes, verdict, verdictNote };
 }

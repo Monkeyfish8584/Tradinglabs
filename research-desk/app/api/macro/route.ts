@@ -1,5 +1,5 @@
 import { env } from "cloudflare:workers";
-import { refreshMacro, type MacroData } from "../../../lib/macro";
+import { refreshMacro, computeMacroSpider, type MacroData, type StockFundamental } from "../../../lib/macro";
 
 export const dynamic = "force-dynamic";
 function db() { if (!env.DB) throw new Error("Research storage is not available"); return env.DB; }
@@ -23,6 +23,18 @@ export async function POST(request: Request) {
       if (Date.now() - Date.parse(prev.fetchedAt) < 10 * 60 * 1000) return json({ macro: prev, throttled: true });
     }
     const macro = await refreshMacro();
+    // Fundamental axis of the macro spider is averaged across the stocks on
+    // the desk (CANSLIM passes, quarterly EPS growth, forward P/E).
+    try {
+      const { results } = await db().prepare("SELECT snapshot,research FROM desk_stocks").all();
+      const stocks: StockFundamental[] = (results as any[]).map(r => {
+        let snap: any = {}, res: any = {};
+        try { snap = JSON.parse(r.snapshot); } catch {}
+        try { res = JSON.parse(r.research); } catch {}
+        return { canslimPasses: res?.canslim?.passes, quarterEPSGrowth: snap?.quarterEPSGrowth, forwardPE: snap?.forwardPE };
+      });
+      macro.spider = computeMacroSpider(macro, stocks);
+    } catch { macro.spider = computeMacroSpider(macro, []); }
     await db().prepare("INSERT INTO desk_settings (key,value) VALUES ('macro',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").bind(JSON.stringify(macro)).run();
     return json({ macro });
   } catch (error) {
