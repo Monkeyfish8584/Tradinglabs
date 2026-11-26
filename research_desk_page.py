@@ -1,35 +1,48 @@
-"""Research Desk page for the Streamlit app.
+"""Macro Desk page for the Streamlit app.
 
-Seeded market figures come from ``research-desk/lib/bootstrap.json``. A name
-added on the page is fetched from Yahoo Finance and Stock Analysis, and any
-field those pages do not publish stays blank. Thesis paragraphs are the ticker
-playbooks already written in ``research-desk/lib/research.ts``.
+This page REPLACES the old Research Desk (PRs #55-#61). The old desk
+grew into a stock-research tool with seeded playbook tickers, a Thesis
+box, CANSLIM, a spider diagram, insider trades and short-squeeze checks.
+The Macro Desk, per Oliver's spec (workspace/user/files/macro-desk-spec_0_ho0x.md),
+is a macro-first dashboard for equity index traders:
 
-Watchlist search, filter, sort and CSV export, generic stock logos, and
-auto-refresh on a stale load follow the React desk (PR #55). Concurrent
-refresh and up to five headlines per stock follow PR #56. Company-name
-search, insider trades, five-year closes, multi-timeframe macro trends with
-news, and near-high/low breadth follow PR #57 (research-desk/lib/macro.ts).
-Red-folder (high-impact) economic events for the next 7 days come from
-Forex Factory's free weekly calendar JSON, filtered to High impact only
-and shown per asset and per group in UK time.
-The macro view is grouped — Indices, then Crypto, then Forex — and clicking
-an asset opens its own detail view with its news and, for indices, its
-breadth. The Technical/Sentiment/Fundamental spider lives only on
-individual stocks, centre-aligned; there is no spider in the macro view.
-Its Fundamental axis is adapted for Streamlit: there is no CANSLIM data
-here, so it uses forward P/E below 20 and EPS (TTM) above zero.
-Politician/congressional trades are not available: there is no free
-structured feed, and disclosures are typically value ranges with no exact
-entry price. The BofA Bull & Bear score is proprietary and is not available
-in this desk; the breadth + trend read is the desk's own equivalent.
+- Five indices (DAX, UK100, US100, US30, US500) with W/D/4H trend pills
+  and breadth gauges (above 50MA, new highs vs previous day).
+- A 7-day red-folder (high-impact) economic calendar, with an event
+  detail panel showing forecast / previous / actual.
+- One index page per index: hero, 60-session price chart, recent news,
+  underlying breadth (top constituents) and red-folder events for it.
+- A watchlist: search by ticker or company name, add, and see price,
+  analyst target + upside/downside, 50MA, 200MA, weekly, daily and
+  forward P/E. Stock detail is a placeholder for now.
+
+Live data comes from the same public providers the old desk used:
+Yahoo Finance for prices/closes (``research_desk_quotes``), Forex
+Factory's free weekly calendar JSON for red-folder events, Google News
+RSS for index news, Stock Analysis for analyst targets / forward P/E.
+A figure stays blank when its source does not publish it; nothing is
+invented. There is no Thesis box, no CANSLIM, no spider, no insider
+trades and no short-squeeze checks in this desk — the spec does not
+ask for them.
+
+Calculation defaults (spec section 4, unconfirmed by the user, all in
+one config place at the top of this file):
+- Trend (W/D/4H): Bullish if the latest close is above the 50-period
+  EMA of that timeframe AND the 50 EMA is rising; otherwise Bearish.
+- Above 50MA / 200MA: latest daily close vs the 50-day / 200-day SMA.
+- Breadth above 50MA: constituents whose latest close is above their
+  own 50-day SMA, out of constituents with enough history.
+- Breadth new highs: constituents whose current session high exceeds
+  the previous session's high.
+- Forward P/E: price / consensus next-12-month EPS (as published by
+  Stock Analysis); analyst target is the consensus mean target.
+
+The Data Hub / Data tab in app.py is untouched by this change.
 """
 
 from __future__ import annotations
 
-import csv
 import html
-import io
 import json
 import math
 import re
@@ -52,306 +65,85 @@ from research_desk_quotes import (
     fetch_text,
     fetch_trend_snapshot,
     normalize_ticker,
-    refresh_quote,
     search_symbols,
-    table_rows,
-    yahoo_chart_url,
+    trend_from_closes,
+    weekly_closes_from_daily,
 )
 
-# Display name, then the Yahoo symbol. GER30 is the DAX index Yahoo publishes as ^GDAXI.
-# Grouped in display order: Indices first, then Crypto, then Forex.
-MACRO_MARKETS: tuple[tuple[str, str], ...] = (
-    ("US500", "^GSPC"),
-    ("US100", "^NDX"),
-    ("US30", "^DJI"),
-    ("UK100", "^FTSE"),
-    ("GER30", "^GDAXI"),
-    ("BTCUSD", "BTC-USD"),
-    ("ETHUSD", "ETH-USD"),
-    ("EUR/USD", "EURUSD=X"),
-    ("GBP/JPY", "GBPJPY=X"),
-    ("USD/JPY", "USDJPY=X"),
-)
+# ---------------------------------------------------------------------------
+# Config — the spec's calculation defaults, in one place (spec section 4).
+# ---------------------------------------------------------------------------
+TREND_EMA_PERIOD = 50
+BREADTH_SMA_PERIOD = 50
+CHART_SESSIONS = 60
+CALENDAR_DAYS = 7
 
-# Asset groups for the macro view, in display order. Each group gets its own
-# headed section — never one long mixed column of assets.
-MACRO_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
-    ("Indices", ("US500", "US100", "US30", "UK100", "GER30")),
-    ("Crypto", ("BTCUSD", "ETHUSD")),
-    ("Forex", ("EUR/USD", "GBP/JPY", "USD/JPY")),
-)
-
-# UK time for red-folder event times. Falls back to UTC where the system
-# has no Europe/London zone data.
 try:
     LONDON = ZoneInfo("Europe/London")
 except Exception:
     LONDON = timezone.utc
 
-# Currencies whose high-impact events move each macro asset. Crypto has no
-# central-bank calendar of its own, so it follows US events — the main
-# macro driver for BTC/ETH — and the detail view says so.
-MACRO_EVENT_CURRENCIES: dict[str, tuple[str, ...]] = {
-    "US500": ("USD",),
-    "US100": ("USD",),
-    "US30": ("USD",),
-    "UK100": ("GBP",),
-    "GER30": ("EUR",),
-    "BTCUSD": ("USD",),
-    "ETHUSD": ("USD",),
-    "EUR/USD": ("EUR", "USD"),
-    "GBP/JPY": ("GBP", "JPY"),
-    "USD/JPY": ("USD", "JPY"),
-}
-
-# Currencies behind each macro group in the overview, for the compact
-# red-folder list under each group: Indices are US + UK + German events,
-# Crypto is US events, Forex is every pair currency.
-MACRO_GROUP_CURRENCIES: dict[str, tuple[str, ...]] = {
-    "Indices": ("USD", "GBP", "EUR"),
-    "Crypto": ("USD",),
-    "Forex": ("EUR", "USD", "GBP", "JPY"),
-}
-
-CLOSE_WINDOWS = (90, 365, 1825)
-DEFAULT_CLOSE_WINDOW = 365
-# Index constituents published on Wikipedia. GER30 uses the current DAX membership.
-BREADTH_SOURCES: dict[str, dict[str, str]] = {
-    "US500": {"url": "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies", "venue": "us500"},
-    "US100": {"url": "https://en.wikipedia.org/wiki/List_of_NASDAQ-100_companies", "venue": "us100"},
-    "US30": {"url": "https://en.wikipedia.org/wiki/List_of_Dow_Jones_Industrial_Average_companies", "venue": "us30"},
-    "UK100": {"url": "https://en.wikipedia.org/wiki/FTSE_100_Index", "venue": "uk100"},
-    "GER30": {"url": "https://en.wikipedia.org/wiki/DAX", "venue": "ger30"},
-}
-_NO_BREADTH = {"BTCUSD", "ETHUSD"}
-
-BASE_DIR = Path(__file__).resolve().parent
-BOOTSTRAP_PATH = BASE_DIR / "research-desk" / "lib" / "bootstrap.json"
-RESEARCH_ENGINE_PATH = BASE_DIR / "research-desk" / "lib" / "research.ts"
-QUOTE_CACHE_PATH = Path(tempfile.gettempdir()) / "tradinglabs-desk-quotes.json"
-
-# Ticker playbooks copied from companyCases in research-desk/lib/research.ts.
-# Titles, cases, proof and invalidation are qualitative. They do not add prices.
-THESES: dict[str, dict[str, str]] = {
-    "USAR": {
-        "title": "Rare-earth supply-chain upside, with funding discipline",
-        "case": "Your USAR case is a potential rerating in domestic critical-minerals supply as customers seek dependable materials. Separate the nearer-term supply-chain business from longer-dated resource-development value, and test how much of either can reach shareholders.",
-        "proof": "For USAR, verify commercial delivery milestones, customer/offtake economics, processing recoveries, the remaining capital budget and any warrants or financing that change the share count.",
-        "invalid": "Reassess USAR if delivery or processing milestones slip materially, capital needs increase, or dilution undermines the upside per share.",
-    },
-    "IBRX": {
-        "title": "Immunotherapy uptake versus the cash needed to scale",
-        "case": "Your IBRX case is that greater commercial uptake of cancer immunotherapy could outpace expectations after a pullback. The evidence should be sustained product sales, reimbursement and better operating economics, alongside clinically meaningful progress.",
-        "proof": "For IBRX, check product-sales progression, approved uses and reimbursement, gross margin, trial evidence and cash burn. Separate approved commercial revenue from pipeline hopes.",
-        "invalid": "Reassess IBRX if commercial uptake or reimbursement disappoints, clinical evidence weakens, or financing pressure grows faster than sales can close the cash-flow gap.",
-    },
-    "ALMU": {
-        "title": "Photonics qualification becoming commercial scale",
-        "case": "Your ALMU case is an early position in photonics and semiconductor technology before commercial adoption is fully recognised. Its fit with robotics is indirect: the important test is whether customer qualification and design wins turn into repeatable, economically attractive sales.",
-        "proof": "For ALMU, distinguish research funding from repeat commercial revenue, verify customer qualification and design wins, and check manufacturing yields, customer concentration and the capital required to scale.",
-        "invalid": "Reassess ALMU if qualifications keep slipping, repeat commercial revenue does not emerge, or funding and competition erode the per-share opportunity.",
-    },
-    "NVO": {
-        "title": "A profitable medical franchise after an expectations reset",
-        "case": "Your NVO case is that durable demand for diabetes and obesity treatment may be valued too pessimistically after a price reset. The valuation needs support from sustainable prescription demand, pricing, competitive position and earnings rather than a return to old share-price highs.",
-        "proof": "For NVO, check treatment demand, realised pricing, supply execution, competitor data, pipeline differentiation and management guidance. Test whether earnings estimates are stabilising.",
-        "invalid": "Reassess NVO if pricing, market share or treatment demand deteriorates enough to reduce durable earnings power, or pipeline differentiation no longer supports the valuation case.",
-    },
-    "UUUU": {
-        "title": "Uranium economics plus a separate rare-earth option",
-        "case": "Your UUUU case combines exposure to nuclear-fuel demand with a potential critical-minerals opportunity. Value the uranium business and rare-earth opportunity separately, then test whether realised prices, recoveries and processing costs justify the capital committed.",
-        "proof": "For UUUU, verify uranium sales and contract terms, inventories, production and processing costs, rare-earth recoveries, remaining capex and balance-sheet capacity.",
-        "invalid": "Reassess UUUU if uranium or rare-earth economics weaken, recoveries or commercial deliveries disappoint, or capital requirements materially dilute the shareholder case.",
-    },
-    "SMR": {
-        "title": "Small modular reactor milestones reaching funded orders",
-        "case": "Your SMR case is that demand for dependable low-carbon power could support small modular reactor development. Demand for nuclear in general becomes valuable to this company only when licensing, customer commitments, financing and delivery economics form a credible commercial project.",
-        "proof": "For SMR, verify the binding nature of customer commitments, customer/project financing, licensing scope, deployment schedules, revenue recognition and the cash needed before delivery.",
-        "invalid": "Reassess SMR if prospective projects fail to become financed commitments, delivery economics worsen, or cash requirements and dilution overwhelm the value of the development pipeline.",
-    },
-}
-
-SQUEEZE_RULES: tuple[tuple[str, str, object], ...] = (
-    ("Short float ≥ 20%", "shortFloatPct", lambda n: n >= 20),
-    ("Days to cover ≥ 3", "daysToCover", lambda n: n >= 3),
-    ("Borrow fee ≥ 10%", "borrowFee", lambda n: n >= 10),
-    ("Available shares ≤ 100k", "available", lambda n: n <= 100_000),
-    ("Day volume / 20d avg ≥ 1.5×", "relativeVolume", lambda n: n >= 1.5),
+# id, label, full name, Yahoo symbol, flag, currency, hero gradient.
+MACRO_INDICES: tuple[dict[str, str], ...] = (
+    {"id": "dax", "label": "DAX", "name": "Germany 40", "symbol": "^GDAXI", "flag": "🇩🇪", "currency": "EUR", "gradient": "linear-gradient(100deg,#1e3a8a,#3b82f6)"},
+    {"id": "uk100", "label": "UK100", "name": "FTSE 100", "symbol": "^FTSE", "flag": "🇬🇧", "currency": "GBP", "gradient": "linear-gradient(100deg,#0f766e,#14b8a6)"},
+    {"id": "ndx", "label": "US100", "name": "Nasdaq 100", "symbol": "^NDX", "flag": "🇺🇸", "currency": "USD", "gradient": "linear-gradient(100deg,#7c3aed,#a78bfa)"},
+    {"id": "dow", "label": "US30", "name": "Dow Jones 30", "symbol": "^DJI", "flag": "🇺🇸", "currency": "USD", "gradient": "linear-gradient(100deg,#92400e,#f59e0b)"},
+    {"id": "spx", "label": "US500", "name": "S&P 500", "symbol": "^GSPC", "flag": "🇺🇸", "currency": "USD", "gradient": "linear-gradient(100deg,#065f46,#10b981)"},
 )
+INDEX_BY_ID = {item["id"]: item for item in MACRO_INDICES}
+INDEX_BY_LABEL = {item["label"]: item for item in MACRO_INDICES}
 
+# Event currency -> indices it affects (spec 3.2, configurable here).
+# EUR affects DAX; GBP affects UK100; USD affects US100, US30, US500.
+# Major US events also affect DAX (Fed Beige Book, FOMC, US CPI, US jobs).
+EVENT_INDEX_MAP: dict[str, tuple[str, ...]] = {
+    "EUR": ("dax",),
+    "GBP": ("uk100",),
+    "USD": ("ndx", "dow", "spx"),
+}
+MAJOR_US_FOR_DAX = ("FED", "FOMC", "BEIGE BOOK", "CPI", "NONFARM", "NFP", "JOBS", "FED CHAIR", "POWELL")
 
-def load_quote_cache(path: Path | None = None) -> dict:
-    """Read refreshed quotes saved for this running app. A missing or broken file is empty."""
-    cache_path = QUOTE_CACHE_PATH if path is None else path
-    try:
-        payload = json.loads(cache_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return {}
-    if not isinstance(payload, dict):
-        return {}
-    refreshed = payload.get("refreshed")
-    added = payload.get("added")
-    errors = payload.get("errors")
-    theses = payload.get("theses")
-    return {
-        "refreshed": refreshed if isinstance(refreshed, dict) else {},
-        "added": added if isinstance(added, dict) else {},
-        "refresh_at": payload.get("refresh_at") if isinstance(payload.get("refresh_at"), str) else None,
-        "errors": [str(item) for item in errors] if isinstance(errors, list) else [],
-        "theses": {str(key): str(value) for key, value in theses.items()} if isinstance(theses, dict) else {},
-    }
+# Index constituents published on Wikipedia. GER30 uses current DAX membership.
+BREADTH_SOURCES: dict[str, dict[str, str]] = {
+    "dax": {"url": "https://en.wikipedia.org/wiki/DAX", "label": "DAX"},
+    "uk100": {"url": "https://en.wikipedia.org/wiki/FTSE_100_Index", "label": "UK100"},
+    "ndx": {"url": "https://en.wikipedia.org/wiki/List_of_NASDAQ-100_companies", "label": "US100"},
+    "dow": {"url": "https://en.wikipedia.org/wiki/List_of_Dow_Jones_Industrial_Average_companies", "label": "US30"},
+    "spx": {"url": "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies", "label": "US500"},
+}
 
+QUOTE_CACHE_PATH = Path(tempfile.gettempdir()) / "tradinglabs-macro-desk-watchlist.json"
 
-def save_quote_cache(payload: dict, path: Path | None = None) -> None:
-    cache_path = QUOTE_CACHE_PATH if path is None else path
-    cache_path.write_text(json.dumps(payload), encoding="utf-8")
-
-
-def load_snapshots() -> list[dict]:
-    if not BOOTSTRAP_PATH.exists():
-        return []
-    payload = json.loads(BOOTSTRAP_PATH.read_text(encoding="utf-8"))
-    if not isinstance(payload, list):
-        return []
-    return [row for row in payload if isinstance(row, dict) and row.get("ticker")]
-
-
-def upside(snapshot: dict) -> float | None:
-    """Same gap as research-desk/lib/model.ts ``upside``."""
-    price = snapshot.get("price")
-    target = snapshot.get("target")
-    if isinstance(price, (int, float)) and isinstance(target, (int, float)) and not isinstance(price, bool) and price > 0:
-        return (target / price - 1) * 100
-    return None
-
-
-def _close_pairs(snapshot: dict) -> list[tuple[date | None, float]]:
-    closes = snapshot.get("closes")
-    if not isinstance(closes, list):
-        return []
-    dates = snapshot.get("closeDates")
-    pairs: list[tuple[date | None, float]] = []
-    for index, close in enumerate(closes):
-        if isinstance(close, bool) or not isinstance(close, (int, float)):
-            continue
-        day = None
-        if isinstance(dates, list) and index < len(dates) and isinstance(dates[index], str):
-            try:
-                day = date.fromisoformat(dates[index][:10])
-            except ValueError:
-                day = None
-        pairs.append((day, float(close)))
-    if pairs and all(day is not None for day, _ in pairs):
-        pairs.sort(key=lambda item: item[0] or date.min)
-    return pairs
-
-
-def _closes(snapshot: dict) -> list[float]:
-    return [close for _, close in _close_pairs(snapshot)]
-
-
-def _parse_fetched_at(value: object) -> datetime | None:
-    """An ISO timestamp from a snapshot, or None when it is missing or unreadable."""
-    if not isinstance(value, str) or not value.strip():
-        return None
-    try:
-        parsed = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
-    except ValueError:
-        return None
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
-    return parsed
-
-
-def _snapshot_fetched_at(snapshot: dict) -> datetime | None:
-    """When a snapshot was last fetched: quoteFetchedAt, then attemptedAt."""
-    for key in ("quoteFetchedAt", "attemptedAt"):
-        fetched = _parse_fetched_at(snapshot.get(key))
-        if fetched is not None:
-            return fetched
-    return None
-
-
-def _is_fresh(snapshot: dict, minutes: int = 5) -> bool:
-    """True when a snapshot was fetched within the last ``minutes`` minutes."""
-    fetched = _snapshot_fetched_at(snapshot)
-    if fetched is None:
-        return False
-    return datetime.now(timezone.utc) - fetched < timedelta(minutes=minutes)
-
-
-def daily_trend(snapshot: dict) -> str | None:
-    """Up or Down only when the latest close is beyond each of the previous three closes."""
-    values = _closes(snapshot)
-    if len(values) < 4:
-        return None
-    latest = values[-1]
-    previous = values[-4:-1]
-    if all(latest > item for item in previous):
-        return "Up"
-    if all(latest < item for item in previous):
-        return "Down"
-    return "Flat"
-
-
-def weekly_trend(snapshot: dict) -> str | None:
-    """This week's close compared with the previous week's close."""
-    pairs = _close_pairs(snapshot)
-    if not pairs or any(day is None for day, _ in pairs):
-        return None
-    latest_day = pairs[-1][0]
-    if latest_day is None:
-        return None
-    this_key = latest_day.isocalendar()[:2]
-    previous_key = (latest_day - timedelta(days=7)).isocalendar()[:2]
-    this_closes = [close for day, close in pairs if day is not None and day.isocalendar()[:2] == this_key]
-    previous_closes = [close for day, close in pairs if day is not None and day.isocalendar()[:2] == previous_key]
-    if not this_closes or not previous_closes:
-        return None
-    this_close = this_closes[-1]
-    previous_close = previous_closes[-1]
-    if this_close > previous_close:
-        return "Up"
-    if this_close < previous_close:
-        return "Down"
-    return "Flat"
-
-
-def rsi_14(snapshot: dict) -> float | None:
-    """Wilder RSI(14) of the stored daily closes. Missing history stays missing."""
-    values = _closes(snapshot)
-    if len(values) < 15:
-        return None
-    changes = [values[index] - values[index - 1] for index in range(1, len(values))]
-    gains = [max(change, 0.0) for change in changes]
-    losses = [max(-change, 0.0) for change in changes]
-    average_gain = sum(gains[:14]) / 14
-    average_loss = sum(losses[:14]) / 14
-    for gain, loss in zip(gains[14:], losses[14:]):
-        average_gain = (average_gain * 13 + gain) / 14
-        average_loss = (average_loss * 13 + loss) / 14
-    if average_gain == 0 and average_loss == 0:
-        return None
-    if average_loss == 0:
-        return 100.0
-    strength = average_gain / average_loss
-    return 100 - (100 / (1 + strength))
-
-
-def average_position(snapshot: dict) -> str | None:
-    """Whether the price is above or below the daily 200-day moving average."""
-    values = _closes(snapshot)
-    if len(values) < 200:
-        return None
-    average = sum(values[-200:]) / 200
-    price = snapshot.get("price")
-    if isinstance(price, bool) or not isinstance(price, (int, float)):
-        price = values[-1]
-    if float(price) > average:
-        return "Above"
-    if float(price) < average:
-        return "Below"
-    return "At the average"
+# Generic, event-type explanations for the event detail panel. These are
+# general descriptions of what the release measures, not data about a
+# specific release — the numbers always come from the Forex Factory feed.
+EVENT_NOTES: tuple[tuple[str, str, str], ...] = (
+    ("CPI", "What it measures: consumer price inflation. Higher than forecast usually points to stickier inflation and can push rate-cut expectations later; lower than forecast usually does the opposite.",
+     "Typical reaction: currency and rate-sensitive stocks often move sharply in the first minutes; indices can swing either way depending on whether the print helps or hurts the rate outlook."),
+    ("PMI", "What it measures: business activity in manufacturing or services. Above 50 means expansion, below 50 means contraction.",
+     "Typical reaction: a surprise either way can move cyclicals and the currency; a weak print can lift rate-cut hopes, a strong one can do the opposite."),
+    ("JOLTS", "What it measures: job openings in the US — a read on how tight the labour market is.",
+     "Typical reaction: a hot labour market can push back rate-cut expectations; a cool one can bring them forward."),
+    ("BEIGE BOOK", "What it is: the Fed's anecdotal survey of economic conditions across its districts, published ahead of FOMC meetings.",
+     "Typical reaction: usually a slow-burn read rather than a spike, but hawkish or dovish language can move bonds and equities."),
+    ("FOMC", "What it is: the US Federal Reserve's rate decision and statement.",
+     "Typical reaction: one of the biggest market movers — rates, the dollar and equities can all swing sharply on the decision and the press conference."),
+    ("NONFARM", "What it measures: US jobs added outside farming, plus unemployment and wage growth.",
+     "Typical reaction: a big beat or miss can move everything — the dollar, yields and equities — within minutes."),
+    ("LAGARDE", "What it is: the ECB President speaking — markets listen for hints on the next rate move.",
+     "Typical reaction: any hint on timing of cuts or hikes can move the euro and European equities."),
+    ("POWELL", "What it is: the Fed Chair speaking — markets listen for hints on the next rate move.",
+     "Typical reaction: any hint on timing of cuts or hikes can move the dollar, yields and equities."),
+    ("GDP", "What it measures: overall economic growth for the quarter.",
+     "Typical reaction: a surprise can shift rate expectations and move equities and the currency."),
+    ("RETAIL SALES", "What it measures: consumer spending — a read on how strong the consumer is.",
+     "Typical reaction: a strong print can lift rate expectations and the currency; a weak one can do the opposite."),
+)
+GENERIC_EVENT_NOTE = (
+    "What it measures: a high-impact economic release. The forecast and previous readings above are the numbers to watch against the actual when it lands.",
+    "Typical reaction: high-impact releases can move the affected currency and its indices sharply in the first minutes after release.",
+)
 
 
 def sma(values: list[float], period: int) -> float | None:
@@ -361,418 +153,184 @@ def sma(values: list[float], period: int) -> float | None:
     return sum(values[-period:]) / period
 
 
-def aggregate_4h(candles: list[dict]) -> list[dict]:
-    """Group consecutive hourly candles into 4-hour candles (PR #57, macro.ts)."""
-    grouped: list[dict] = []
-    for start in range(0, len(candles) - 3, 4):
-        group = candles[start : start + 4]
-        highs = [c.get("high") for c in group if isinstance(c.get("high"), (int, float)) and not isinstance(c.get("high"), bool)]
-        lows = [c.get("low") for c in group if isinstance(c.get("low"), (int, float)) and not isinstance(c.get("low"), bool)]
-        volumes = [c.get("volume") for c in group if isinstance(c.get("volume"), (int, float)) and not isinstance(c.get("volume"), bool)]
-        grouped.append(
-            {
-                "date": group[-1].get("date"),
-                "open": group[0].get("open"),
-                "high": max(highs) if highs else None,
-                "low": min(lows) if lows else None,
-                "close": group[-1].get("close"),
-                "volume": sum(volumes) if volumes else None,
-            }
-        )
-    return grouped
+def event_notes(title: str) -> tuple[str, str]:
+    """Generic explanation for an event title, from EVENT_NOTES or the generic fallback."""
+    upper = (title or "").upper()
+    for keyword, expected, reaction in EVENT_NOTES:
+        if keyword in upper:
+            return expected, reaction
+    return GENERIC_EVENT_NOTE
 
 
-def macro_trend_for(candles: list[dict]) -> dict:
-    """Multi-timeframe trend for one set of candles (PR #57, macro.ts ``trendFor``).
-
-    Bullish = close up on the period AND above its 20-period average;
-    Bearish = close down AND below it; otherwise Mixed. Fewer than 21
-    candles is Unavailable.
-    """
-    closes = [
-        float(c["close"])
-        for c in candles
-        if isinstance(c.get("close"), (int, float)) and not isinstance(c.get("close"), bool) and math.isfinite(float(c["close"]))
-    ]
-    if len(closes) < 21:
-        return {"label": "Unavailable", "changePct": None, "aboveSma20": None, "note": "Fewer than 21 completed candles."}
-    latest, previous = closes[-1], closes[-2]
-    average = sma(closes, 20)
-    if average is None:
-        return {"label": "Unavailable", "changePct": None, "aboveSma20": None, "note": "No 20-period average."}
-    above = latest > average
-    change_pct = (latest / previous - 1) * 100 if previous > 0 else None
-    if latest > previous and above:
-        label = "Bullish"
-    elif latest < previous and not above:
-        label = "Bearish"
-    else:
-        label = "Mixed"
-    note = {
-        "Bullish": "Close up on the period and above its 20-period average.",
-        "Bearish": "Close down on the period and below its 20-period average.",
-        "Mixed": "Close and 20-period average disagree.",
-    }[label]
-    return {"label": label, "changePct": change_pct, "aboveSma20": above, "note": note}
+def affected_indices(event: dict) -> list[str]:
+    """Index ids affected by one red-folder event (spec 3.2)."""
+    country = str(event.get("country") or "").upper()
+    ids = list(EVENT_INDEX_MAP.get(country, ()))
+    if country == "USD":
+        title = str(event.get("title") or "").upper()
+        if any(word in title for word in MAJOR_US_FOR_DAX) and "dax" not in ids:
+            ids.append("dax")
+    return ids
 
 
-def _return_over_days(snapshot: dict, days: int) -> float | None:
-    """Date-anchored return over ``days``: latest close vs the close on or before that date."""
-    pairs = _close_pairs(snapshot)
-    if not pairs or any(day is None for day, _ in pairs):
-        return None
-    latest_day, latest_close = pairs[-1]
-    if latest_day is None or latest_close == 0:
-        return None
-    target_day = latest_day - timedelta(days=days)
-    earlier = [close for day, close in pairs if day is not None and day <= target_day]
-    if not earlier or earlier[-1] == 0:
-        return None
-    return (latest_close / earlier[-1] - 1) * 100
-
-
-def close_window(snapshot: dict, days: int) -> tuple[list[float], list[str] | None]:
-    """Closes inside the last ``days`` calendar days, ending on the latest stored close."""
-    pairs = _close_pairs(snapshot)
-    if not pairs:
-        return [], None
-    if any(day is None for day, _ in pairs):
-        return [close for _, close in pairs], None
-    latest = pairs[-1][0]
-    if latest is None:
-        return [close for _, close in pairs], None
-    start = latest - timedelta(days=days - 1)
-    chosen = [(day, close) for day, close in pairs if day is not None and day >= start]
-    return [close for _, close in chosen], [day.isoformat() for day, _ in chosen]
-
-
-def squeeze_checks(snapshot: dict) -> list[dict]:
-    """Same five heuristics as research-desk/lib/model.ts ``squeezeChecks``."""
-    checks: list[dict] = []
-    for label, key, test in SQUEEZE_RULES:
-        value = snapshot.get(key)
-        known = isinstance(value, (int, float)) and not isinstance(value, bool)
-        checks.append(
-            {
-                "label": label,
-                "key": key,
-                "value": value if known else None,
-                "known": known,
-                "passed": bool(known and test(value)),
-            }
-        )
-    return checks
-
-
-def thesis_for(ticker: str) -> dict[str, str] | None:
-    thesis = THESES.get(ticker)
-    if thesis is None:
-        return None
-    return dict(thesis)
-
-
-def _money(value: object, *, signed: bool = False) -> str | None:
+def _money(value: object, symbol: str = "$") -> str | None:
     if not isinstance(value, (int, float)) or isinstance(value, bool):
         return None
+    return f"{symbol}{float(value):,.2f}"
+
+
+def _percent(value: object, digits: int = 1, *, signed: bool = False) -> str | None:
+    if not isinstance(value, (int, float)) or isinstance(value, bool) or not math.isfinite(float(value)):
+        return None
     number = float(value)
-    body = f"${abs(number):,.2f}"
+    body = f"{abs(number):,.{digits}f}%"
     if number < 0:
         return f"-{body}"
-    if signed and number > 0:
-        return f"+{body}"
-    return body
+    return f"+{body}" if signed and number > 0 else body
 
 
-def trend_text(value: object) -> str:
-    if value in {"Up", "Down", "Flat"}:
-        return str(value)
-    return "Not enough closes"
-
-
-def load_macro_rows(getter=None) -> list[dict]:
-    """Daily and weekly trend for the macro markets, plus a 4-hour trend and news. A failed feed stays blank."""
-    rows: list[dict] = []
-    for label, symbol in MACRO_MARKETS:
-        try:
-            snapshot = fetch_trend_snapshot(symbol, getter, span="6mo")
-        except QuoteError:
-            rows.append({"label": label, "daily": None, "weekly": None, "four_hour": {"label": "Unavailable", "changePct": None, "aboveSma20": None, "note": "Macro data unavailable."}, "news": [], "available": False})
-            continue
-        try:
-            hourly = fetch_candles(symbol, interval="60m", span="1mo", getter=getter)
-            four_hour = macro_trend_for(aggregate_4h(hourly))
-        except Exception:
-            four_hour = {"label": "Unavailable", "changePct": None, "aboveSma20": None, "note": "4-hour candles unavailable."}
-        try:
-            news = fetch_news_rss(f"{label} market news", getter=getter) or []
-        except Exception:
-            news = []
-        rows.append(
-            {
-                "label": label,
-                "daily": daily_trend(snapshot),
-                "weekly": weekly_trend(snapshot),
-                "four_hour": four_hour,
-                "news": news,
-                "available": True,
-            }
-        )
-    return rows
-
-
-def _trend_class(value: object) -> str:
-    if value in {"Up", "Bullish"}:
-        return "macro-up"
-    if value in {"Down", "Bearish"}:
-        return "macro-down"
-    if value in {"Flat", "Mixed"}:
-        return "macro-flat"
-    return "macro-missing"
-
-
-def _macro_trend_label(value: object) -> str:
-    """A trend label whether it is a plain Up/Down/Flat string or a macro_trend_for dict."""
-    if isinstance(value, dict):
-        label = value.get("label")
-        return str(label) if isinstance(label, str) and label else "Unavailable"
-    if value in {"Up", "Down", "Flat", "Bullish", "Bearish", "Mixed"}:
-        return str(value)
-    return "Unavailable"
+def _pill(label: str, trend: str | None) -> str:
+    """A W/D/4H pill: the word Bullish or Bearish, never colour alone."""
+    if trend == "Bullish":
+        return f'<span class="md-pill md-bull">{html.escape(label)}<br>Bullish</span>'
+    if trend == "Bearish":
+        return f'<span class="md-pill md-bear">{html.escape(label)}<br>Bearish</span>'
+    return f'<span class="md-pill md-missing">{html.escape(label)}<br>Unavailable</span>'
 
 
 MACRO_CSS = """
 <style>
-.macro-strip { display: flex; gap: 0.55rem; flex-wrap: wrap; }
-.macro-card {
-  flex: 1 1 7.5rem; border: 1px solid rgba(128,128,128,0.35);
-  border-radius: 8px; padding: 0.4rem 0.6rem; line-height: 1.35;
-}
-.macro-selected { outline: 2px solid rgba(27,127,74,0.85); }
-.macro-name { font-weight: 700; }
-.macro-name a { color: inherit; }
-.macro-detail-link { margin-top: 0.2rem; font-size: 0.85rem; }
-.macro-up { color: #1b7f4a; font-weight: 700; }
-.macro-down { color: #b42318; font-weight: 700; }
-.macro-flat, .macro-missing { font-weight: 700; }
-.macro-news { font-size: 0.85rem; line-height: 1.4; margin-top: 0.3rem; }
-.macro-news a { font-weight: 400; }
-.macro-news-item { display: flex; gap: 0.45rem; align-items: flex-start; margin-top: 0.35rem; }
-.macro-news-thumb { width: 48px; height: 36px; object-fit: cover; border-radius: 4px; flex: none; }
-.macro-news-favicon { object-fit: contain; background: #fff; border: 1px solid rgba(128,128,128,0.3); }
-.macro-news-placeholder {
-  display: inline-flex; align-items: center; justify-content: center;
-  background: #6b7280; color: #fff; font-weight: 700; font-size: 1rem;
-}
-.macro-news-meta { font-size: 0.75rem; color: rgba(128,128,128,0.9); }
-.macro-events { font-size: 0.85rem; line-height: 1.45; margin-top: 0.45rem; border-top: 1px solid rgba(180,35,24,0.4); padding-top: 0.35rem; }
-.macro-events-title { font-weight: 700; color: #b42318; }
-.macro-event { margin-top: 0.25rem; }
-.macro-event-meta { font-size: 0.75rem; color: rgba(128,128,128,0.9); }
+@import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;700&family=DM+Mono:wght@400;500&display=swap');
+.md-title { font-family: 'DM Sans', sans-serif; }
+.md-mono { font-family: 'DM Mono', monospace; font-variant-numeric: tabular-nums; }
+.md-strip { display: flex; gap: 0.6rem; flex-wrap: wrap; }
+.md-card { flex: 1 1 11rem; border: 1px solid rgba(128,128,128,0.35); border-radius: 10px; padding: 0.6rem 0.7rem; line-height: 1.35; background: var(--md-card-bg, transparent); }
+.md-card.md-active { outline: 2px solid #2563eb; }
+.md-card-name { font-weight: 700; font-size: 1.05rem; }
+.md-card-change { font-family: 'DM Mono', monospace; font-weight: 500; float: right; }
+.md-up { color: #15803d; } .md-down { color: #b42318; }
+.md-pills { display: flex; gap: 0.35rem; margin: 0.45rem 0; }
+.md-pill { flex: 1; text-align: center; font-size: 0.8rem; line-height: 1.3; padding: 0.35rem 0.2rem; border-radius: 6px; }
+.md-bull { background: rgba(21,128,61,0.12); color: #15803d; }
+.md-bear { background: rgba(180,35,24,0.12); color: #b42318; }
+.md-missing { background: rgba(128,128,128,0.15); color: #666; }
+.md-gauge-label { font-size: 0.78rem; color: #666; }
+.md-gauge-num { font-family: 'DM Mono', monospace; font-weight: 500; }
+.md-gauge-track { height: 6px; border-radius: 3px; background: rgba(128,128,128,0.25); margin: 0.2rem 0 0.45rem; overflow: hidden; }
+.md-gauge-fill { height: 100%; border-radius: 3px; }
+.md-hero { border-radius: 12px; padding: 1.1rem 1.2rem; color: #fff; margin-bottom: 0.6rem; position: relative; overflow: hidden; }
+.md-hero h2 { margin: 0; color: #fff; }
+.md-hero .md-hero-price { font-family: 'DM Mono', monospace; font-size: 1.1rem; }
+.md-hero .md-hero-flag { position: absolute; right: 1rem; top: 0.9rem; font-size: 1.4rem; font-weight: 700; opacity: 0.9; }
+.md-hero .md-skyline { position: absolute; right: 0; bottom: 0; opacity: 0.25; font-size: 2.2rem; letter-spacing: 0.1rem; line-height: 1; }
+.md-event-chip { display: block; width: 100%; text-align: left; background: rgba(180,35,24,0.10); border-left: 3px solid #b42318; border-radius: 6px; padding: 0.4rem 0.5rem; margin-top: 0.4rem; font-size: 0.85rem; line-height: 1.35; }
+.md-event-chip .md-event-meta { font-size: 0.78rem; color: #666; }
+.md-news-item { margin: 0.45rem 0; font-size: 0.92rem; }
+.md-news-meta { font-size: 0.78rem; color: #666; }
+.md-breadth-num { font-family: 'DM Mono', monospace; font-size: 1.5rem; font-weight: 500; }
+.md-dot { display: inline-block; width: 0.7rem; height: 0.7rem; border-radius: 50%; }
+.md-dot-on { background: #15803d; } .md-dot-off { background: rgba(128,128,128,0.35); }
+table.md-watchlist { width: 100%; border-collapse: collapse; font-size: 0.92rem; }
+table.md-watchlist th, table.md-watchlist td { text-align: left; padding: 0.45rem 0.4rem; border-bottom: 1px solid rgba(128,128,128,0.28); vertical-align: top; }
 </style>
 """
 
 
-def _news_html(news: list | None, limit: int = 5) -> str:
-    """News items as headline links with a small thumbnail each.
+# ---------------------------------------------------------------------------
+# Data loading — cached, honest unavailable states, no invented figures.
+# ---------------------------------------------------------------------------
 
-    The thumbnail is the real image from the news feed where the feed
-    supplies one (``image``), else the publisher's favicon (``favicon``),
-    else a small placeholder with the publisher's initial. No image is
-    invented or fetched from an unrelated source.
+def _trend_from_candles(candles: list[dict]) -> str | None:
+    """EMA50 trend for one candle set (spec section 4)."""
+    closes = [float(c["close"]) for c in candles if isinstance(c.get("close"), (int, float)) and not isinstance(c.get("close"), bool)]
+    return trend_from_closes(closes, TREND_EMA_PERIOD)
+
+
+def load_index_data(index_id: str, getter=None) -> dict:
+    """Price, change, W/D/4H trends and last-60-session closes for one index.
+
+    Returns {"available": False, ...} when Yahoo does not return a price —
+    the page shows that honestly instead of guessing.
     """
-    items = [item for item in (news or []) if isinstance(item, dict) and item.get("title") and item.get("url")]
-    if not items:
-        return "<div class=\"macro-news\">News unavailable</div>"
-    parts: list[str] = ["<div class=\"macro-news\">"]
-    for item in items[:limit]:
-        title = html.escape(str(item.get("title")))
-        url = html.escape(str(item.get("url")), quote=True)
-        source = html.escape(str(item.get("source") or ""))
-        date_text = html.escape(str(item.get("date") or ""))
-        meta = " · ".join(part for part in (source, date_text) if part)
-        meta_html = f"<div class=\"macro-news-meta\">{meta}</div>" if meta else ""
-        image = item.get("image")
-        favicon = item.get("favicon")
-        if isinstance(image, str) and image.startswith("http"):
-            thumb = (
-                f'<img class="macro-news-thumb" src="{html.escape(image, quote=True)}" alt="" loading="lazy" '
-                f"onerror=\"this.style.display='none'\" />"
-            )
-        elif isinstance(favicon, str) and favicon.startswith("http"):
-            thumb = (
-                f'<img class="macro-news-thumb macro-news-favicon" src="{html.escape(favicon, quote=True)}" alt="" loading="lazy" '
-                f"onerror=\"this.style.display='none'\" />"
-            )
-        else:
-            initial = html.escape((source or "?")[:1].upper())
-            thumb = f'<span class="macro-news-thumb macro-news-placeholder" aria-hidden="true">{initial}</span>'
-        parts.append(
-            f"<div class=\"macro-news-item\">{thumb}"
-            f"<div><a href=\"{url}\" target=\"_blank\" rel=\"noopener\">{title}</a>{meta_html}</div></div>"
-        )
-    parts.append("</div>")
-    return "".join(parts)
+    item = INDEX_BY_ID[index_id]
+    symbol = item["symbol"]
+    try:
+        quote = fetch_trend_snapshot(symbol, getter, span="6mo")
+        daily = fetch_candles(symbol, interval="1d", span="1y", getter=getter)
+    except QuoteError:
+        return {"id": index_id, "available": False}
+    try:
+        weekly = fetch_candles(symbol, interval="1wk", span="5y", getter=getter)
+    except QuoteError:
+        weekly = []
+    try:
+        hourly = fetch_candles(symbol, interval="60m", span="1mo", getter=getter)
+        four_hour = _trend_from_candles(_aggregate_4h(hourly))
+    except QuoteError:
+        four_hour = None
+    closes60 = [c["close"] for c in daily[-CHART_SESSIONS:]]
+    dates60 = [c["date"] for c in daily[-CHART_SESSIONS:]]
+    return {
+        "id": index_id,
+        "available": True,
+        "price": quote.get("price"),
+        "change_pct": quote.get("changePct"),
+        "currency": quote.get("currency"),
+        "weekly_trend": _trend_from_candles(weekly),
+        "daily_trend": _trend_from_candles(daily),
+        "four_hour_trend": four_hour,
+        "closes60": closes60,
+        "dates60": dates60,
+        "daily_candles": daily,
+    }
 
 
-
-def _events_for(calendar: dict | None, currencies: tuple[str, ...]) -> list[dict]:
-    """High-impact events from one fetched calendar, for these currencies."""
-    if not isinstance(calendar, dict):
-        return []
-    events = calendar.get("events")
-    if not isinstance(events, list):
-        return []
-    wanted = set(currencies)
-    return [
-        event
-        for event in events
-        if isinstance(event, dict) and event.get("country") in wanted
-    ]
+def _aggregate_4h(candles: list[dict]) -> list[dict]:
+    """Group consecutive hourly candles into 4-hour candles."""
+    grouped: list[dict] = []
+    for start in range(0, len(candles) - 3, 4):
+        group = candles[start : start + 4]
+        grouped.append({"date": group[-1].get("date"), "close": group[-1].get("close"), "high": max(c["high"] for c in group), "low": min(c["low"] for c in group)})
+    return grouped
 
 
-def _red_folder_event_html(event: dict) -> str:
-    """One high-impact event: UK date/time, currency, title, forecast/previous."""
-    when = event.get("date")
-    if isinstance(when, datetime):
-        when_text = when.astimezone(LONDON).strftime("%a %d %b, %H:%M")
-    else:
-        when_text = html.escape(str(when or ""))
-    title = html.escape(str(event.get("title") or ""))
-    country = html.escape(str(event.get("country") or ""))
-    forecast = str(event.get("forecast") or "").strip()
-    previous = str(event.get("previous") or "").strip()
-    meta = " · ".join(
-        part
-        for part in (
-            f"Fcst {forecast}" if forecast else "",
-            f"Prev {previous}" if previous else "",
-        )
-        if part
-    )
-    meta_html = (
-        f"<div class=\"macro-event-meta\">{html.escape(meta)}</div>" if meta else ""
-    )
-    return (
-        f"<div class=\"macro-event\">🔴 <strong>{html.escape(when_text)}</strong>"
-        f" — {country} {title}{meta_html}</div>"
-    )
+@st.cache_data(ttl=300, show_spinner=False)
+def cached_index_data(index_id: str) -> dict:
+    """Index data, recalculated at most every 5 minutes (spec section 4)."""
+    return load_index_data(index_id)
 
 
-def _red_folder_html(
-    events: list,
-    available: bool,
-    partial: bool,
-    limit: int = 3,
-    heading: str = "Red-folder news — next 7 days (UK time)",
-) -> str:
-    """Compact high-impact (red-folder) event list, or an honest empty state.
+@st.cache_data(ttl=3600, show_spinner=False)
+def cached_red_folder() -> dict:
+    """All high-impact events for the next 7 days, fetched at most hourly."""
+    return fetch_red_folder_events()
 
-    ``events`` are already filtered to the currencies wanted and sorted by
-    date. An unavailable calendar, or a week with no high-impact events
-    for those currencies, is stated as such — never filled in.
+
+# --- Constituents and breadth (spec section 4) ---------------------------
+
+def constituent_symbols(html_body: str, index_id: str) -> list[str]:
+    """Yahoo symbols for one index from its Wikipedia list page.
+
+    An unreadable table returns an empty list. Lists are loaded from the
+    data source, not hard-coded (spec section 2).
     """
-    parts: list[str] = [
-        "<div class=\"macro-events\">"
-        f"<div class=\"macro-events-title\">🔴 {html.escape(heading)}</div>"
-    ]
-    if not available:
-        parts.append("<div>Economic calendar unavailable</div>")
-    elif not events:
-        parts.append(
-            "<div>No high-impact (red-folder) events in the next 7 days.</div>"
-        )
-    else:
-        parts.extend(_red_folder_event_html(event) for event in events[:limit])
-    if available and partial:
-        parts.append(
-            "<div class=\"macro-event-meta\">Next week's calendar feed was not "
-            "available, so this list may end before the full 7 days.</div>"
-        )
-    parts.append("</div>")
-    return "".join(parts)
+    from research_desk_quotes import table_rows
 
-
-def macro_trends_html(
-    rows: list[dict], selected: str | None = None, calendar: dict | None = None
-) -> str:
-    """Macro assets grouped — Indices, then Crypto, then Forex — each group headed.
-
-    Every asset name is a link to its own detail view (``?asset=<label>``).
-    The overview shows up to 3 headlines per asset; the detail view shows 5.
-    When ``calendar`` is given, a compact red-folder list follows each group.
-    """
-    by_label = {str(row.get("label") or ""): row for row in rows}
-    sections: list[str] = []
-    for group_name, labels in MACRO_GROUPS:
-        cards: list[str] = []
-        for label in labels:
-            row = by_label.get(label)
-            if row is None:
-                continue
-            daily = trend_text(row.get("daily")) if row.get("available") else "Unavailable"
-            weekly = trend_text(row.get("weekly")) if row.get("available") else "Unavailable"
-            four_hour = _macro_trend_label(row.get("four_hour")) if row.get("available") else "Unavailable"
-            name = html.escape(label)
-            href = html.escape(f"?asset={urllib.parse.quote(label)}", quote=True)
-            name = f'<a href="{href}" target="_self">{name}</a>'
-            selected_class = " macro-selected" if label == selected else ""
-            news = row.get("news") if isinstance(row.get("news"), list) else []
-            detail_label = "View news & breadth →" if label in BREADTH_SOURCES else "View news →"
-            cards.append(
-                f"<div class=\"macro-card{selected_class}\">"
-                f"<div class=\"macro-name\">{name}</div>"
-                f"<div>Daily <span class=\"{_trend_class(row.get('daily') if row.get('available') else None)}\">{html.escape(daily)}</span></div>"
-                f"<div>Weekly <span class=\"{_trend_class(row.get('weekly') if row.get('available') else None)}\">{html.escape(weekly)}</span></div>"
-                f"<div>4-hour <span class=\"{_trend_class(four_hour if row.get('available') else None)}\">{html.escape(four_hour)}</span></div>"
-                f"<div class=\"macro-detail-link\"><a href=\"{href}\" target=\"_self\">{detail_label}</a></div>"
-                f"{_news_html(news, limit=3)}"
-                "</div>"
-            )
-        if cards:
-            section = (
-                f"<h3>{html.escape(group_name)}</h3><div class=\"macro-strip\">"
-                + "".join(cards)
-                + "</div>"
-            )
-            if calendar is not None:
-                group_events = _events_for(
-                    calendar, MACRO_GROUP_CURRENCIES.get(group_name, ())
-                )
-                section += _red_folder_html(
-                    group_events,
-                    bool(calendar.get("available")),
-                    bool(calendar.get("partial")),
-                    limit=3,
-                    heading=f"Red-folder news — {group_name} (next 7 days, UK time)",
-                )
-            sections.append(section)
-    return "".join(sections)
-
-
-def _ticker_cell(text: str, pattern: str) -> str | None:
-    cleaned = text.strip().upper()
-    if re.fullmatch(pattern, cleaned):
-        return cleaned
-    return None
-
-
-def constituent_symbols(html_body: str, label: str) -> list[str]:
-    """Yahoo symbols for one index. An unreadable table returns an empty list."""
     rows = table_rows(html_body)
     found: list[str] = []
-    if label == "US500":
+    if index_id == "spx":
         start = next((i for i, row in enumerate(rows) if row and row[0]["text"].strip() == "Symbol"), None)
         column, pattern, venue = 0, r"[A-Z]{1,5}(?:\.[A-Z])?", "us"
-    elif label == "US100":
+    elif index_id == "ndx":
         start = next((i for i, row in enumerate(rows) if row and row[0]["text"].strip() == "Ticker"), None)
         column, pattern, venue = 0, r"[A-Z]{1,5}(?:\.[A-Z])?", "us"
-    elif label == "US30":
+    elif index_id == "dow":
         start = next((i for i, row in enumerate(rows) if len(row) > 2 and row[2]["text"].strip() == "Symbol"), None)
         column, pattern, venue = 2, r"[A-Z]{1,5}(?:\.[A-Z])?", "us"
-    elif label == "UK100":
+    elif index_id == "uk100":
         start = next((i for i, row in enumerate(rows) if len(row) > 1 and row[0]["text"].strip() == "Company" and row[1]["text"].strip().startswith("Ticker")), None)
         column, pattern, venue = 1, r"[A-Z0-9]{2,6}(?:\.[A-Z])?", "uk"
-    elif label == "GER30":
+    elif index_id == "dax":
         start = next((i for i, row in enumerate(rows) if row and row[0]["text"].strip() == "Ticker"), None)
         column, pattern, venue = 0, r"[A-Z0-9]{1,6}\.[A-Z]{1,3}", "de"
     else:
@@ -782,9 +340,10 @@ def constituent_symbols(html_body: str, label: str) -> list[str]:
     for row in rows[start + 1 :]:
         if len(row) <= column:
             break
-        symbol = _ticker_cell(row[column]["text"], pattern)
-        if symbol is None:
+        cleaned = row[column]["text"].strip().upper()
+        if not re.fullmatch(pattern, cleaned):
             break
+        symbol = cleaned
         if venue == "us":
             symbol = symbol.replace(".", "-")
         elif venue == "uk":
@@ -799,1021 +358,486 @@ def constituent_symbols(html_body: str, label: str) -> list[str]:
     return unique
 
 
-def parse_session_extremes(body: str) -> dict | None:
-    """Latest session high and low, plus the 52-week high and low, from a Yahoo chart."""
-    try:
-        payload = json.loads(body)
-    except json.JSONDecodeError:
-        return None
-    result = (payload.get("chart") or {}).get("result") or []
-    if not result:
-        return None
-    meta = result[0].get("meta") or {}
+def constituent_names(html_body: str, index_id: str) -> list[str]:
+    """Company names alongside constituent_symbols, in the same row order."""
+    from research_desk_quotes import table_rows
 
-    def number(key: str) -> float | None:
-        value = meta.get(key)
-        if isinstance(value, bool) or not isinstance(value, (int, float)):
-            return None
-        return float(value)
-
-    extremes = {
-        "day_high": number("regularMarketDayHigh"),
-        "day_low": number("regularMarketDayLow"),
-        "high_52": number("fiftyTwoWeekHigh"),
-        "low_52": number("fiftyTwoWeekLow"),
-    }
-    if any(value is None for value in extremes.values()):
-        return None
-    return extremes
-
-
-def _at_high(day_high: float, high_52: float) -> bool:
-    """Near a 52-week high: the day high is within 1% of the 52-week high."""
-    return high_52 > 0 and day_high >= high_52 * 0.99
-
-
-def _at_low(day_low: float, low_52: float) -> bool:
-    """Near a 52-week low: the day low is within 1% of the 52-week low."""
-    return low_52 > 0 and day_low <= low_52 * 1.01
-
-
-def breadth_summary(label: str, symbols: list[str], extremes: list[dict | None]) -> dict:
-    """Percent of constituents at a 52-week high or low. Missing quotes stay out of both shares."""
-    highs = lows = measured = unknown = 0
-    for item in extremes:
-        if not item:
-            unknown += 1
-            continue
-        measured += 1
-        if _at_high(item["day_high"], item["high_52"]):
-            highs += 1
-        if _at_low(item["day_low"], item["low_52"]):
-            lows += 1
-    attempted = measured + unknown
-    ready = bool(symbols) and measured > 0 and measured * 2 >= attempted
-    high_pct = None if not ready else highs / measured * 100
-    low_pct = None if not ready else lows / measured * 100
-    return {
-        "label": label,
-        "listed": len(symbols),
-        "measured": measured,
-        "unknown": unknown,
-        "highs": highs,
-        "lows": lows,
-        "high_pct": high_pct,
-        "low_pct": low_pct,
-        "ready": ready,
-    }
-
-
-def load_breadth(label: str, getter=None) -> dict:
-    """Constituent 52-week highs and lows for one index. Crypto has no constituent list."""
-    if label in _NO_BREADTH:
-        return {"label": label, "applies": False, "ready": False}
-    source = BREADTH_SOURCES.get(label)
-    if source is None:
-        return {"label": label, "applies": False, "ready": False}
-    get = getter or fetch_text
-    try:
-        page = get(source["url"])
-    except Exception:
-        return {"label": label, "applies": True, "ready": False, "listed": 0}
-    symbols = constituent_symbols(page, label)
-
-    def one(symbol: str) -> dict | None:
-        try:
-            body = get(yahoo_chart_url(symbol, "5d"))
-        except Exception:
-            return None
-        return parse_session_extremes(body)
-
-    if getter is None and len(symbols) > 1:
-        with ThreadPoolExecutor(max_workers=8) as pool:
-            extremes = list(pool.map(one, symbols))
+    rows = table_rows(html_body)
+    names: list[str] = []
+    if index_id == "spx":
+        start = next((i for i, row in enumerate(rows) if row and row[0]["text"].strip() == "Symbol"), None)
+        name_col = 1
+    elif index_id == "ndx":
+        start = next((i for i, row in enumerate(rows) if row and row[0]["text"].strip() == "Ticker"), None)
+        name_col = 1
+    elif index_id == "dow":
+        start = next((i for i, row in enumerate(rows) if len(row) > 2 and row[2]["text"].strip() == "Symbol"), None)
+        name_col = 0
+    elif index_id == "uk100":
+        start = next((i for i, row in enumerate(rows) if len(row) > 1 and row[0]["text"].strip() == "Company" and row[1]["text"].strip().startswith("Ticker")), None)
+        name_col = 0
+    elif index_id == "dax":
+        start = next((i for i, row in enumerate(rows) if row and row[0]["text"].strip() == "Ticker"), None)
+        name_col = 1
     else:
-        extremes = [one(symbol) for symbol in symbols]
-    summary = breadth_summary(label, symbols, extremes)
-    summary["applies"] = True
-    return summary
-
-
-def breadth_text(summary: dict) -> str:
-    label = summary.get("label") or "This index"
-    if summary.get("applies") is False:
-        return f"Underlying highs and lows do not apply to {label}."
-    if not summary.get("ready"):
-        return f"{label} did not publish enough constituent quotes to calculate a near-high or near-low percentage."
-    unknown = int(summary.get("unknown") or 0)
-    text = (
-        f"{summary['high_pct']:.1f}% of {summary['measured']} constituents were near a 52-week high in the latest session "
-        f"({summary['highs']} names). "
-        f"{summary['low_pct']:.1f}% were near a 52-week low ({summary['lows']} names). "
-        f"Coverage: {summary['measured']} of {summary.get('listed', summary['measured'])} listed constituents measured."
-    )
-    if unknown:
-        text += f" {unknown} constituents had no published session range, so they are left out of both percentages."
-    return text
-
-
-def _spider_verdict(technical: int | None, sentiment: int | None, fundamental: int | None) -> tuple[str, str]:
-    """Verdict for a Technical/Sentiment/Fundamental spider, 0-10 each.
-
-    Same wording as the macro spider had (PR #57): a high Sentiment score
-    means crowded, which is caution, not a buy signal.
-    """
-    verdict = "Mixed — check the axes below."
-    verdict_note = "No single shape dominates. Read the lowest axis first: that is where the setup is weakest."
-    if technical is not None and sentiment is not None and fundamental is not None:
-        if sentiment >= 8 and fundamental >= 6 and technical >= 6:
-            verdict = "Crowded, not broken"
-            verdict_note = "Sentiment is high but fundamentals are decent and the trend is up. Everyone already likes it — expect sharp dips on any disappointment — but the underlying story looks intact. Picky entries, sensible size."
-        elif technical < 4 and fundamental >= 6:
-            verdict = "Watchlist, not a short"
-            verdict_note = "Technically weak but fundamentally strong. Wait for the trend to turn rather than shorting a good story."
-        elif technical >= 7 and sentiment >= 7 and fundamental < 4:
-            verdict = "Momentum-bubble shape"
-            verdict_note = "Trend and crowd are hot, fundamentals are weak. Momentum can run, but there is little underneath it."
-        elif technical < 4 and sentiment < 4 and fundamental < 4:
-            verdict = "No reason to be here yet"
-            verdict_note = "All three axes are low. Nothing in the setup earns attention right now."
-        elif 5 <= technical <= 7 and 5 <= sentiment <= 7 and 5 <= fundamental <= 7:
-            verdict = "Healthy, well-rounded setup"
-            verdict_note = "A balanced triangle: trend, crowd and fundamentals are all in the middle of the range."
-    return verdict, verdict_note
-
-
-def compute_stock_spider(snapshot: dict) -> dict:
-    """Technical/Sentiment/Fundamental spider for one stock, 0-10 each.
-
-    Same 0-10 axes as the macro spider had, scored from this stock's own
-    snapshot only — nothing is borrowed from other stocks or invented.
-    Each axis is rescaled over the inputs that are actually available, so a
-    missing input does not drag the score to zero; an axis with no usable
-    inputs is None (Unavailable), never 0.
-
-    Technical (10): daily trend x4 (Up 4, Flat 2, Down 0), weekly trend x3
-    (Up 3, Flat 1.5, Down 0), price vs the 200-day average x3 (Above 3,
-    Below 0). Needs at least one of daily trend, weekly trend, 200-day
-    position; fewer than 200 stored closes means no 200-day position.
-    Sentiment (10), read backwards — high = crowded = caution: RSI(14)
-    distance from 50 x5, plus short float x5 (short float / 20%, capped).
-    Fundamental (10): forward P/E below 20 x5 + EPS (TTM) above zero x5 —
-    the same adaptation the macro spider used, here for one stock.
-    """
-    clamp = lambda n: max(0, min(10, round(n)))
-
-    def rescale(scored: float, possible: float) -> int | None:
-        if possible <= 0:
-            return None
-        return clamp(scored / possible * 10)
-
-    trend_points = {"Up": 1.0, "Flat": 0.5, "Down": 0.0}
-    technical_scored = 0.0
-    technical_possible = 0.0
-    daily = daily_trend(snapshot)
-    if daily in trend_points:
-        technical_scored += trend_points[daily] * 4
-        technical_possible += 4
-    weekly = weekly_trend(snapshot)
-    if weekly in trend_points:
-        technical_scored += trend_points[weekly] * 3
-        technical_possible += 3
-    position = average_position(snapshot)
-    if position in {"Above", "Below"}:
-        technical_scored += 3 if position == "Above" else 0
-        technical_possible += 3
-    technical = rescale(technical_scored, technical_possible)
-
-    sentiment_scored = 0.0
-    sentiment_possible = 0.0
-    rsi = rsi_14(snapshot)
-    if rsi is not None:
-        sentiment_scored += min(1.0, abs(rsi - 50) / 50) * 5
-        sentiment_possible += 5
-    short_float = _snapshot_number(snapshot, "shortFloatPct")
-    if short_float is not None:
-        sentiment_scored += min(1.0, max(0.0, short_float) / 20) * 5
-        sentiment_possible += 5
-    sentiment = rescale(sentiment_scored, sentiment_possible)
-
-    fundamental_scored = 0.0
-    fundamental_possible = 0.0
-    forward_pe = _snapshot_number(snapshot, "forwardPE")
-    if forward_pe is not None:
-        fundamental_scored += 5 if forward_pe < 20 else 0
-        fundamental_possible += 5
-    eps = _snapshot_number(snapshot, "eps")
-    if eps is not None:
-        fundamental_scored += 5 if eps > 0 else 0
-        fundamental_possible += 5
-    fundamental = rescale(fundamental_scored, fundamental_possible)
-
-    axes = [
-        {"axis": "Technical", "score": technical, "note": "Daily trend x4, weekly trend x3, price vs 200-day average x3; rescaled over the inputs available for this stock."},
-        {"axis": "Sentiment", "score": sentiment, "note": "Read backwards — high = crowded = caution. RSI(14) distance from 50 x5 + short float x5 (20% = full). Proxy only: no put/call ratio or live BofA reading in this desk."},
-        {"axis": "Fundamental", "score": fundamental, "note": "Forward P/E below 20 x5 + EPS (TTM) above zero x5; rescaled over the inputs available for this stock."},
-    ]
-    verdict, verdict_note = _spider_verdict(technical, sentiment, fundamental)
-    return {"axes": axes, "verdict": verdict, "verdict_note": verdict_note}
-
-
-def _spider_svg(axes: list[dict]) -> str:
-    """Hand-rolled SVG triangle for a Technical/Sentiment/Fundamental spider (same pattern as the React macro panel)."""
-    centre_x, centre_y, radius = 150.0, 140.0, 110.0
-    vertices = {
-        "Technical": (centre_x, centre_y - radius),
-        "Sentiment": (centre_x - radius * 0.95, centre_y + radius * 0.75),
-        "Fundamental": (centre_x + radius * 0.95, centre_y + radius * 0.75),
-    }
-    labels = {
-        "Technical": (centre_x, centre_y - radius - 12),
-        "Sentiment": (centre_x - radius * 0.95 - 8, centre_y + radius * 0.75 + 18),
-        "Fundamental": (centre_x + radius * 0.95 + 8, centre_y + radius * 0.75 + 18),
-    }
-    scores = {item["axis"]: item.get("score") for item in axes if isinstance(item, dict)}
-
-    def point(axis: str, scale: float) -> tuple[float, float]:
-        vx, vy = vertices[axis]
-        return (centre_x + (vx - centre_x) * scale, centre_y + (vy - centre_y) * scale)
-
-    def polygon(scale: float) -> str:
-        return " ".join(f"{x:.1f},{y:.1f}" for x, y in (point(axis, scale) for axis in ("Technical", "Sentiment", "Fundamental")))
-
-    scored_points = []
-    for axis in ("Technical", "Sentiment", "Fundamental"):
-        score = scores.get(axis)
-        scored_points.append(point(axis, (score / 10) if isinstance(score, (int, float)) else 0))
-    scored = " ".join(f"{x:.1f},{y:.1f}" for x, y in scored_points)
-    parts = [
-        '<svg width="300" height="260" viewBox="0 0 300 260" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Spider diagram">',
-        f'<polygon points="{polygon(1.0)}" fill="none" stroke="#888888" stroke-opacity="0.5" />',
-        f'<polygon points="{polygon(0.5)}" fill="none" stroke="#888888" stroke-opacity="0.35" />',
-    ]
-    for axis in ("Technical", "Sentiment", "Fundamental"):
-        vx, vy = vertices[axis]
-        parts.append(f'<line x1="{centre_x}" y1="{centre_y}" x2="{vx}" y2="{vy}" stroke="#888888" stroke-opacity="0.35" />')
-    parts.append(f'<polygon points="{scored}" fill="rgba(27,127,74,0.25)" stroke="#1b7f4a" stroke-width="2" />')
-    for axis in ("Technical", "Sentiment", "Fundamental"):
-        x, y = scored_points[("Technical", "Sentiment", "Fundamental").index(axis)]
-        parts.append(f'<circle cx="{x:.1f}" cy="{y:.1f}" r="4" fill="#1b7f4a" />')
-        lx, ly = labels[axis]
-        anchor = "middle" if axis == "Technical" else ("end" if axis == "Sentiment" else "start")
-        score = scores.get(axis)
-        shown = f"{score}/10" if isinstance(score, (int, float)) else "Unavailable"
-        parts.append(f'<text x="{lx:.1f}" y="{ly:.1f}" text-anchor="{anchor}" font-size="12" font-weight="700" fill="currentColor">{axis} {shown}</text>')
-    parts.append("</svg>")
-    return "".join(parts)
-
-
-@st.cache_data(ttl=900, show_spinner=False)
-def cached_macro_rows() -> list[dict]:
-    return load_macro_rows()
+        return []
+    if start is None:
+        return []
+    symbols = constituent_symbols(html_body, index_id)
+    for row in rows[start + 1 : start + 1 + len(symbols)]:
+        if len(row) <= name_col:
+            names.append("")
+        else:
+            names.append(row[name_col]["text"].strip())
+    return names
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
-def cached_red_folder() -> dict:
-    """All high-impact events for the next 7 days, fetched at most hourly.
+def cached_constituents(index_id: str) -> dict:
+    """Constituent symbols and names for one index, from Wikipedia."""
+    source = BREADTH_SOURCES.get(index_id)
+    if source is None:
+        return {"symbols": [], "names": []}
+    try:
+        page = fetch_text(source["url"])
+    except Exception:
+        return {"symbols": [], "names": []}
+    return {"symbols": constituent_symbols(page, index_id), "names": constituent_names(page, index_id)}
 
-    The Forex Factory feed is rate-limited (roughly 2 downloads per 5
-    minutes), so one hourly fetch shared by the overview and every detail
-    view stays well inside that.
+
+def breadth_summary(index_id: str, per_symbol: list[dict | None]) -> dict:
+    """Above-50MA and new-high counts, per the spec's definitions.
+
+    ``per_symbol`` is one entry per constituent: {"above50": bool|None,
+    "new_high": bool|None} or None when that constituent published no
+    usable closes. Missing constituents stay out of both counts.
     """
-    return fetch_red_folder_events()
-
-
-def _requested_macro() -> str | None:
-    """Macro asset requested via ``?asset=<label>`` (``?breadth=<label>`` still works for old links).
-
-    Matches case-insensitively against MACRO_MARKETS so ``us500`` and
-    ``US500`` both work; returns the canonical label or None.
-    """
-    for key in ("asset", "breadth"):
-        value = st.query_params.get(key)
-        if isinstance(value, list):
-            value = value[0] if value else None
-        if not isinstance(value, str) or not value.strip():
+    above = highs = measured = unknown = 0
+    for item in per_symbol:
+        if not item or item.get("above50") is None and item.get("new_high") is None:
+            unknown += 1
             continue
-        wanted = value.strip().upper()
-        for label, _symbol in MACRO_MARKETS:
-            if label.upper() == wanted:
-                return label
-        return None
-    return None
+        measured += 1
+        if item.get("above50"):
+            above += 1
+        if item.get("new_high"):
+            highs += 1
+    listed = len(per_symbol)
+    ready = listed > 0 and measured > 0 and measured * 2 >= listed
+    return {"index_id": index_id, "listed": listed, "measured": measured, "unknown": unknown, "above50": above, "new_highs": highs, "ready": ready}
+
+
+def load_macro_breadth(index_id: str, getter=None) -> dict:
+    """Breadth for one index: above 50MA and new highs vs previous day.
+
+    Each constituent needs at least 51 daily closes for its 50-day SMA
+    and the last two sessions' highs for the new-high read. A constituent
+    that does not publish them is left out, never counted as either.
+    """
+    symbols = cached_constituents(index_id).get("symbols") or []
+    if not symbols:
+        return {"index_id": index_id, "listed": 0, "measured": 0, "unknown": 0, "above50": 0, "new_highs": 0, "ready": False, "top": []}
+    get = getter or fetch_text
+
+    def one(symbol: str) -> dict | None:
+        try:
+            candles = fetch_candles(symbol, interval="1d", span="6mo", getter=get)
+        except Exception:
+            return None
+        closes = [float(c["close"]) for c in candles if isinstance(c.get("close"), (int, float))]
+        if len(closes) < BREADTH_SMA_PERIOD + 1 or len(candles) < 2:
+            return None
+        average = sma(closes, BREADTH_SMA_PERIOD)
+        if average is None:
+            return None
+        last, previous = candles[-1], candles[-2]
+        return {
+            "symbol": symbol,
+            "above50": closes[-1] > average,
+            "new_high": bool(isinstance(last.get("high"), (int, float)) and isinstance(previous.get("high"), (int, float)) and float(last["high"]) > float(previous["high"])),
+        }
+
+    if getter is None and len(symbols) > 1:
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            per_symbol = list(pool.map(one, symbols))
+    else:
+        per_symbol = [one(symbol) for symbol in symbols]
+    summary = breadth_summary(index_id, per_symbol)
+    names = cached_constituents(index_id).get("names") or []
+    top: list[dict] = []
+    for position, item in enumerate(per_symbol[:8]):
+        if item is None:
+            continue
+        top.append({"name": names[position] if position < len(names) else item["symbol"], "symbol": item["symbol"], "above50": item["above50"], "new_high": item["new_high"]})
+    summary["top"] = top
+    return summary
 
 
 @st.cache_data(ttl=1800, show_spinner=False)
-def cached_breadth(label: str) -> dict:
-    return load_breadth(label)
+def cached_breadth(index_id: str) -> dict:
+    """Breadth, recalculated at most every 30 minutes."""
+    return load_macro_breadth(index_id)
 
 
-def render_macro_trends() -> None:
-    """Macro trends, grouped Indices / Crypto / Forex, on the Research Desk page.
+def parent_index(ticker: str) -> str | None:
+    """Which of the five indices lists this ticker, if any.
 
-    Clicking an asset opens its own detail view (its news, its red-folder
-    list and, for indices, its breadth). There is no spider in the macro view.
+    Tickers are matched with their exchange suffix stripped (e.g. SAP.DE
+    and AZN.L match the DAX / FTSE lists). A ticker in no list returns None.
     """
-    st.markdown("**Macro trends**")
-    with st.spinner("Loading macro trends…"):
-        try:
-            rows = cached_macro_rows()
-        except Exception:
-            st.caption("Macro trends could not be loaded.")
-            return
-    try:
-        calendar = cached_red_folder()
-    except Exception:
-        calendar = {"events": [], "available": False, "partial": False}
-    selected = _requested_macro()
-    labels = {str(row.get("label") or "") for row in rows}
-    if selected is not None and selected not in labels:
-        st.warning(f"{selected} is not a macro asset in this desk.")
-        selected = None
-    if selected is not None:
-        _render_macro_asset(selected, rows, calendar)
+    base = (ticker or "").upper().replace(".DE", "").replace(".L", "").replace("-", ".")
+    for item in MACRO_INDICES:
+        symbols = cached_constituents(item["id"]).get("symbols") or []
+        for symbol in symbols:
+            if symbol.upper().replace(".DE", "").replace(".L", "").replace("-", ".") == base:
+                return item["label"]
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Red-folder calendar (spec 3.2)
+# ---------------------------------------------------------------------------
+
+def calendar_days(calendar: dict | None, today: date | None = None) -> list[dict]:
+    """Seven day columns starting today, each with its high-impact events."""
+    start = today or datetime.now(LONDON).date()
+    events = []
+    if isinstance(calendar, dict) and isinstance(calendar.get("events"), list):
+        events = [e for e in calendar["events"] if isinstance(e, dict) and isinstance(e.get("date"), datetime)]
+    days: list[dict] = []
+    for offset in range(CALENDAR_DAYS):
+        day = start + timedelta(days=offset)
+        day_events = [e for e in events if e["date"].astimezone(LONDON).date() == day]
+        days.append({"date": day, "weekend": day.weekday() >= 5, "events": sorted(day_events, key=lambda e: e["date"])})
+    return days
+
+
+def _event_key(event: dict) -> str:
+    when = event.get("date")
+    stamp = when.isoformat() if isinstance(when, datetime) else str(when or "")
+    return f"{stamp}|{event.get('country') or ''}|{event.get('title') or ''}"
+
+
+def render_event_detail() -> None:
+    """Event detail panel for the selected red-folder event.
+
+    Streamlit has no native modal, so the detail renders as a panel at
+    the top of the calendar with a Close button (and the same panel is
+    used from index pages). It shows forecast / previous / actual, a
+    generic explanation, the typical reaction, and affected indices.
+    """
+    selected = st.session_state.get("macro_event")
+    if not selected:
         return
-    st.markdown(
-        MACRO_CSS
-        + macro_trends_html(rows, selected, calendar),
-        unsafe_allow_html=True,
+    calendar = st.session_state.get("macro_calendar") or {}
+    events = calendar.get("events") if isinstance(calendar, dict) else []
+    event = next((e for e in (events or []) if isinstance(e, dict) and _event_key(e) == selected), None)
+    if event is None:
+        st.session_state.macro_event = None
+        return
+    when = event.get("date")
+    when_text = when.astimezone(LONDON).strftime("%a %d %b, %H:%M") if isinstance(when, datetime) else str(when or "")
+    expected, reaction = event_notes(str(event.get("title") or ""))
+    st.markdown("### 🔴 " + html.escape(str(event.get("title") or "")))
+    st.write(f"{when_text} · {event.get('country') or ''} · High impact")
+    cols = st.columns(3)
+    cols[0].metric("Forecast", str(event.get("forecast") or "–"))
+    cols[1].metric("Previous", str(event.get("previous") or "–"))
+    cols[2].metric("Actual", str(event.get("actual") or "–"))
+    st.caption("Actual shows – until the release, then it updates from the calendar feed.")
+    st.markdown("**What's expected**")
+    st.write(expected)
+    st.markdown("**Typical reaction**")
+    st.write(reaction)
+    st.markdown("**Affected indices**")
+    ids = affected_indices(event)
+    if not ids:
+        st.caption("No index in this desk is directly affected by this event.")
+    for index_id in ids:
+        item = INDEX_BY_ID[index_id]
+        if st.button(f"{item['flag']} {item['label']} — {item['name']}", key=f"macro_event_index_{index_id}"):
+            st.session_state.macro_event = None
+            st.query_params["index"] = index_id
+            st.rerun()
+    if st.button("Close", key="macro_event_close"):
+        st.session_state.macro_event = None
+        st.rerun()
+
+
+def render_calendar(calendar: dict | None, index_id: str | None = None) -> None:
+    """Seven day columns of red-folder events, filtered by index if given."""
+    st.markdown("## Red folder — next 7 days")
+    if isinstance(calendar, dict) and not calendar.get("available"):
+        st.caption("Economic calendar unavailable — the Forex Factory feed could not be read.")
+        return
+    days = calendar_days(calendar)
+    if index_id is not None:
+        days = [{**day, "events": [e for e in day["events"] if index_id in affected_indices(e)]} for day in days]
+    cols = st.columns(7)
+    for col, day in zip(cols, days):
+        with col:
+            st.markdown(f"**{day['date'].strftime('%a %d')}**")
+            if day["weekend"]:
+                st.caption("Weekend")
+            elif not day["events"]:
+                st.caption("Nothing red")
+            for event in day["events"]:
+                when = event["date"].astimezone(LONDON).strftime("%H:%M")
+                label = f"{event.get('title') or ''} · {when} · {event.get('country') or ''}"
+                if st.button(label, key=f"macro_event_{_event_key(event)}", width="stretch"):
+                    st.session_state.macro_event = _event_key(event)
+                    st.session_state.macro_calendar = calendar
+                    st.rerun()
+    if isinstance(calendar, dict) and calendar.get("partial"):
+        st.caption("Next week's calendar feed was not available, so this list may end before the full 7 days.")
+
+
+def render_red_folder_list(calendar: dict | None, index_id: str) -> None:
+    """Red-folder list for one index, on its index page (spec 3.3)."""
+    item = INDEX_BY_ID[index_id]
+    st.markdown(f"## Red folder for {item['label']}")
+    if isinstance(calendar, dict) and not calendar.get("available"):
+        st.caption("Economic calendar unavailable.")
+        return
+    events = [e for e in calendar_days(calendar) for e in e["events"]] if calendar else []
+    mine = [e for e in events if index_id in affected_indices(e)]
+    if not mine:
+        st.caption(f"No high-impact (red-folder) events for {item['label']} in the next 7 days.")
+        return
+    for event in mine:
+        when = event["date"].astimezone(LONDON).strftime("%a %d %b, %H:%M") if isinstance(event.get("date"), datetime) else ""
+        if st.button(f"{event.get('title') or ''} — {when} · {event.get('country') or ''}", key=f"macro_list_event_{_event_key(event)}", width="stretch"):
+            st.session_state.macro_event = _event_key(event)
+            st.session_state.macro_calendar = calendar
+            st.rerun()
+
+
+# ---------------------------------------------------------------------------
+# Top index strip (spec 3.1) and index pages (spec 3.3)
+# ---------------------------------------------------------------------------
+
+def _strip_card(item: dict, data: dict, active: bool) -> str:
+    label = item["label"]
+    if not data.get("available"):
+        change = "—"
+        change_class = ""
+        pills = _pill("W", None) + _pill("D", None) + _pill("4H", None)
+        gauges = '<div class="md-gauge-label">Breadth unavailable</div>'
+    else:
+        change = _percent(data.get("change_pct"), 2, signed=True) or "—"
+        change_class = "md-up" if (data.get("change_pct") or 0) >= 0 else "md-down"
+        pills = _pill("W", data.get("weekly_trend")) + _pill("D", data.get("daily_trend")) + _pill("4H", data.get("four_hour_trend"))
+        breadth = data.get("breadth") or {}
+        if breadth.get("ready"):
+            listed = int(breadth.get("listed") or 0)
+            above = int(breadth.get("above50") or 0)
+            highs = int(breadth.get("new_highs") or 0)
+            above_pct = (above / listed * 100) if listed else 0
+            high_pct = (highs / listed * 100) if listed else 0
+            above_colour = "#15803d" if above_pct >= 50 else "#b42318"
+            gauges = (
+                f'<div><span class="md-gauge-label" title="Constituents whose latest close is above their 50-day moving average">50MA</span> '
+                f'<span class="md-gauge-num" style="float:right">{above}/{listed}</span></div>'
+                f'<div class="md-gauge-track"><div class="md-gauge-fill" style="width:{above_pct:.0f}%;background:{above_colour}"></div></div>'
+                f'<div><span class="md-gauge-label" title="Constituents whose current session high exceeds the previous session high">Highs</span> '
+                f'<span class="md-gauge-num" style="float:right">{highs}/{listed}</span></div>'
+                f'<div class="md-gauge-track"><div class="md-gauge-fill" style="width:{high_pct:.0f}%;background:#2563eb"></div></div>'
+            )
+        else:
+            gauges = '<div class="md-gauge-label">Breadth unavailable — not enough constituent quotes published.</div>'
+    active_class = " md-active" if active else ""
+    href = f"?index={item['id']}"
+    return (
+        f'<div class="md-card{active_class}">'
+        f'<div><a href="{href}" target="_self" style="text-decoration:none;color:inherit">'
+        f'<span class="md-card-name">{item["flag"]} {html.escape(label)}</span>'
+        f'<span class="md-card-change {change_class}">{html.escape(change)}</span></a></div>'
+        f'<div class="md-pills">{pills}</div>{gauges}</div>'
     )
-    st.caption(
-        "Indices at the top, then Crypto, then Forex. "
-        "Daily, weekly and 4-hour trend. "
-        "Daily is Up when the latest close is higher than each of the previous three daily closes, and Down when it is lower than each of them. Otherwise it is Flat. "
-        "Weekly is this week's close against the previous week's close. "
-        "4-hour is the Bullish/Bearish/Mixed read from 4-hour candles: Bullish when the close is up on the period and above its 20-period average, Bearish when it is down and below it, otherwise Mixed. "
-        "Click an asset — its name, or “View news” — to open its own page with its news and, for indices, the share of its constituents near a 52-week high or low. "
-        "That breadth read does not apply to crypto or forex: they have no constituent list. "
-        "Each news item shows a small thumbnail: the image from the news feed where the feed supplies one, otherwise the publisher's favicon. "
-        "Red-folder news is the Forex Factory high-impact calendar for the next 7 days, in UK time — only High-impact events, in a short list under each group and in full on each asset's own page. If the calendar feed is down, that section says so instead of guessing. "
-        "The BofA Bull & Bear score is proprietary and not available in this desk; the breadth + trend read is the desk's own equivalent."
-    )
 
 
-def _render_red_folder_section(label: str, calendar: dict | None) -> None:
-    """Full 1-week red-folder list for one macro asset (detail view)."""
-    currencies = MACRO_EVENT_CURRENCIES.get(label, ())
-    st.markdown("**Red-folder news — next 7 days (UK time)**")
-    if label in ("BTCUSD", "ETHUSD"):
-        st.caption(
-            "Crypto has no central-bank calendar of its own, so this shows "
-            "US high-impact events — the main macro driver for crypto."
-        )
-    available = bool(calendar.get("available")) if isinstance(calendar, dict) else False
-    partial = bool(calendar.get("partial")) if isinstance(calendar, dict) else False
-    st.markdown(
-        MACRO_CSS
-        + _red_folder_html(
-            _events_for(calendar, currencies), available, partial, limit=20
-        ),
-        unsafe_allow_html=True,
-    )
+def render_strip(active_id: str | None = None) -> dict:
+    """Five index cards in a row, with W/D/4H pills and breadth gauges.
+
+    Returns {index_id: data} so the index page can reuse the same load.
+    """
+    st.markdown('<h1 class="md-title"><a href="?index=" target="_self" style="text-decoration:none;color:inherit">Macro Desk</a></h1>', unsafe_allow_html=True)
+    st.caption("Live data from Yahoo Finance, Forex Factory and Google News. A figure stays blank when its source does not publish it.")
+    data: dict[str, dict] = {}
+    with st.spinner("Loading indices…"):
+        for item in MACRO_INDICES:
+            try:
+                data[item["id"]] = cached_index_data(item["id"])
+            except Exception:
+                data[item["id"]] = {"id": item["id"], "available": False}
+    # Breadth is slow (one quote per constituent), so load it only for the
+    # strip's gauges and cache it for 30 minutes.
+    for item in MACRO_INDICES:
+        try:
+            data[item["id"]]["breadth"] = cached_breadth(item["id"])
+        except Exception:
+            data[item["id"]]["breadth"] = {"ready": False}
+    st.markdown(MACRO_CSS + '<div class="md-strip">' + "".join(_strip_card(item, data[item["id"]], active_id == item["id"]) for item in MACRO_INDICES) + "</div>", unsafe_allow_html=True)
+    st.caption("50MA: constituents above their 50-day moving average. Highs: constituents whose current session high exceeds the previous session's high. Click a card to open that index.")
+    return data
 
 
-def _render_macro_asset(label: str, rows: list[dict], calendar: dict | None = None) -> None:
-    """One macro asset on its own: its trends, its news, and — for indices — its breadth, plus its full 1-week red-folder list."""
-    if st.button("← Back to all macro trends", key="macro_back"):
+def render_index_page(index_id: str, data: dict, calendar: dict | None) -> None:
+    """One index on one page: hero, 60-session chart, news, breadth, red folder."""
+    item = INDEX_BY_ID[index_id]
+    info = data.get(index_id) or {}
+    if st.button("← Back to Macro Desk", key="macro_index_back"):
         st.query_params.clear()
         st.rerun()
-    row = next((item for item in rows if str(item.get("label") or "") == label), None)
-    st.markdown(f"### {label}")
-    if row is None or not row.get("available"):
-        st.caption("Trend and news could not be loaded for this asset.")
-        _render_red_folder_section(label, calendar)
-        return
-    daily = trend_text(row.get("daily"))
-    weekly = trend_text(row.get("weekly"))
-    four_hour = _macro_trend_label(row.get("four_hour"))
-    st.write(f"Daily: {daily}. Weekly: {weekly}. 4-hour: {four_hour}.")
-    if isinstance(row.get("four_hour"), dict) and row["four_hour"].get("note"):
-        st.caption(str(row["four_hour"]["note"]))
-    st.markdown("**News**")
-    news = row.get("news") if isinstance(row.get("news"), list) else []
-    st.markdown(MACRO_CSS + _news_html(news, limit=5), unsafe_allow_html=True)
-    _render_red_folder_section(label, calendar)
-    st.markdown("**Breadth — new highs vs new lows**")
-    if label in BREADTH_SOURCES:
-        _render_breadth(label)
-    elif label in _NO_BREADTH:
-        st.info(f"Underlying highs and lows do not apply to {label}: crypto has no constituent list, so there is no breadth indicator here.")
-    else:
-        st.info(
-            f"There is no breadth indicator for {label}: a currency pair has no "
-            "constituent list, so there is nothing to count near a 52-week high or low."
-        )
-
-
-def _render_stock_spider(snapshot: dict) -> None:
-    """Centre-aligned Technical/Sentiment/Fundamental spider for one stock."""
-    spider = compute_stock_spider(snapshot)
-    st.markdown("**Spider — Technical / Sentiment / Fundamental**")
-    _col_left, col_centre, _col_right = st.columns([1, 2, 1])
-    with col_centre:
-        st.markdown(_spider_svg(spider["axes"]), unsafe_allow_html=True)
-    st.dataframe(
-        pd.DataFrame(
-            [
-                {"Axis": item["axis"], "Score (0–10)": item["score"] if isinstance(item.get("score"), (int, float)) else "Unavailable", "Note": item["note"]}
-                for item in spider["axes"]
-            ]
-        ),
-        use_container_width=True,
-        hide_index=True,
-    )
-    st.markdown(f"**{spider['verdict']}**")
-    st.write(spider["verdict_note"])
-    st.caption(
-        "Example: Technical 7, Sentiment 8, Fundamental 6 — Crowded, not broken (illustrative example, not live data). "
-        "Sentiment is read backwards: a high score means crowded, which is caution, not a buy signal. "
-        "Each axis is scored only from this stock's own snapshot and rescaled over the inputs available; an axis with no usable inputs shows as Unavailable, never 0."
-    )
-
-
-def _render_breadth(label: str) -> None:
-    if label in _NO_BREADTH:
-        st.info(f"Underlying highs and lows do not apply to {label}.")
-        return
-    if label not in BREADTH_SOURCES:
-        return
-    with st.spinner(f"Checking {label} constituents…"):
-        try:
-            summary = cached_breadth(label)
-        except Exception:
-            st.warning(f"{label} constituent strength could not be loaded.")
-            return
-    st.markdown(f"**{label} underlying strength**")
-    st.write(breadth_text(summary))
-    if summary.get("ready"):
-        st.caption(
-            "A constituent counts as near a new high when its latest session high is within 1% of the 52-week high, "
-            "and as near a new low when its latest session low is within 1% of the 52-week low."
-        )
-
-
-def rsi_text(snapshot: dict) -> str:
-    value = rsi_14(snapshot)
-    if value is None:
-        return "Not enough closes"
-    return f"{value:.1f}"
-
-
-def average_text(snapshot: dict) -> str:
-    position = average_position(snapshot)
-    if position is None:
-        return "Not enough closes"
-    return position
-
-
-def _percent(value: object, digits: int = 1, *, signed: bool = False) -> str | None:
-    if not isinstance(value, (int, float)) or isinstance(value, bool):
-        return None
-    number = float(value)
-    text = f"{number:.{digits}f}%"
-    if signed and number > 0:
-        return f"+{text}"
-    return text
-
-
-def _multiple(value: object) -> str | None:
-    if not isinstance(value, (int, float)) or isinstance(value, bool):
-        return None
-    return f"{float(value):.1f}×"
-
-
-def _count(value: object) -> str | None:
-    if not isinstance(value, (int, float)) or isinstance(value, bool):
-        return None
-    return f"{float(value):,.2f}".rstrip("0").rstrip(".")
-
-
-def _snapshot_number(snapshot: dict, key: str) -> float | None:
-    value = snapshot.get(key)
-    return value if isinstance(value, (int, float)) and not isinstance(value, bool) else None
-
-
-def _snapshot_text(snapshot: dict, key: str) -> str | None:
-    value = snapshot.get(key)
-    return value if isinstance(value, str) and value else None
-
-
-def watchlist_rows(snapshots: list[dict] | None = None) -> list[dict]:
-    rows: list[dict] = []
-    for snapshot in snapshots if snapshots is not None else load_snapshots():
-        gap = upside(snapshot)
-        checks = squeeze_checks(snapshot)
-        met = sum(1 for check in checks if check["passed"])
-        unknown = sum(1 for check in checks if not check["known"])
-        thesis = thesis_for(str(snapshot.get("ticker", "")))
-        rows.append(
-            {
-                "ticker": snapshot.get("ticker"),
-                "name": snapshot.get("name"),
-                "price": snapshot.get("price") if isinstance(snapshot.get("price"), (int, float)) else None,
-                "daily_trend": daily_trend(snapshot),
-                "weekly_trend": weekly_trend(snapshot),
-                "rsi": rsi_text(snapshot),
-                "average": average_text(snapshot),
-                "target": snapshot.get("target") if isinstance(snapshot.get("target"), (int, float)) else None,
-                "upside": gap,
-                "eps": snapshot.get("eps") if isinstance(snapshot.get("eps"), (int, float)) else None,
-                "forward_pe": snapshot.get("forwardPE") if isinstance(snapshot.get("forwardPE"), (int, float)) else None,
-                "thesis": None if thesis is None else thesis["title"],
-                "squeeze_met": met,
-                "squeeze_unknown": unknown,
-                "currency": _snapshot_text(snapshot, "currency"),
-                "quote_at": _snapshot_text(snapshot, "quoteAt") or _snapshot_text(snapshot, "quoteFetchedAt"),
-                "short_float": _snapshot_number(snapshot, "shortFloatPct"),
-                "shares_short": _snapshot_number(snapshot, "shortShares"),
-                "short_date": _snapshot_text(snapshot, "shortDate"),
-                "days_to_cover": _snapshot_number(snapshot, "daysToCover"),
-                "borrow_fee": _snapshot_number(snapshot, "borrowFee"),
-                "available": _snapshot_number(snapshot, "available"),
-                "borrow_at": _snapshot_text(snapshot, "borrowAt"),
-                "stage": _snapshot_text(snapshot, "stage"),
-                "notes": "; ".join(_source_notes(snapshot)),
-            }
-        )
-    rows.sort(key=lambda row: (row["upside"] is None, -(row["upside"] or 0), str(row["ticker"])))
-    return rows
-
-
-WATCHLIST_FILTERS: tuple[str, ...] = (
-    "All stocks",
-    "Large target gap ≥50%",
-    "High short interest ≥20%",
-)
-
-WATCHLIST_SORTS: tuple[str, ...] = (
-    "Target upside",
-    "Ticker A–Z",
-    "Short float",
-    "Borrow fee",
-)
-
-
-def filter_watchlist_rows(rows: list[dict], query: str = "", filter_option: str = "All stocks", sort_option: str = "Target upside") -> list[dict]:
-    """Search (ticker or company name), filter and sort a watchlist view (PR #55).
-
-    The displayed table and the CSV export both use this filtered/sorted view.
-    """
-    text = (query or "").strip().lower()
-    shown = list(rows)
-    if text:
-        shown = [row for row in shown if text in str(row.get("ticker") or "").lower() or text in str(row.get("name") or "").lower()]
-    if filter_option == "Large target gap ≥50%":
-        shown = [row for row in shown if row.get("upside") is not None and float(row["upside"]) >= 50]
-    elif filter_option == "High short interest ≥20%":
-        shown = [row for row in shown if row.get("short_float") is not None and float(row["short_float"]) >= 20]
-    if sort_option == "Ticker A–Z":
-        shown.sort(key=lambda row: str(row.get("ticker") or ""))
-    elif sort_option == "Short float":
-        shown.sort(key=lambda row: (row.get("short_float") is None, -(row.get("short_float") or 0), str(row.get("ticker"))))
-    elif sort_option == "Borrow fee":
-        shown.sort(key=lambda row: (row.get("borrow_fee") is None, -(row.get("borrow_fee") or 0), str(row.get("ticker"))))
-    else:
-        shown.sort(key=lambda row: (row.get("upside") is None, -(row.get("upside") or 0), str(row.get("ticker"))))
-    return shown
-
-
-WATCHLIST_CSV_COLUMNS: tuple[str, ...] = (
-    "Ticker",
-    "Company",
-    "Currency",
-    "Price",
-    "Quote as of",
-    "Average analyst target",
-    "Target upside %",
-    "EPS TTM",
-    "Forward PE",
-    "Short float %",
-    "Shares short",
-    "SI date",
-    "Days to cover",
-    "Borrow fee %",
-    "Shares available",
-    "Borrow as of",
-    "Stage",
-    "Notes",
-    "Thesis",
-)
-
-
-def watchlist_csv(rows: list[dict], theses: dict | None = None) -> str:
-    """The filtered/sorted watchlist view as CSV (PR #55). A saved user thesis wins over the playbook title."""
-    saved = theses or {}
-    buffer = io.StringIO()
-    writer = csv.writer(buffer)
-    writer.writerow(list(WATCHLIST_CSV_COLUMNS))
-
-    def number(value: object) -> object:
-        return value if isinstance(value, (int, float)) and not isinstance(value, bool) else ""
-
-    for row in rows:
-        ticker = str(row.get("ticker") or "")
-        writer.writerow(
-            [
-                ticker,
-                row.get("name") or "",
-                row.get("currency") or "",
-                number(row.get("price")),
-                row.get("quote_at") or "",
-                number(row.get("target")),
-                number(row.get("upside")),
-                number(row.get("eps")),
-                number(row.get("forward_pe")),
-                number(row.get("short_float")),
-                number(row.get("shares_short")),
-                row.get("short_date") or "",
-                number(row.get("days_to_cover")),
-                number(row.get("borrow_fee")),
-                number(row.get("available")),
-                row.get("borrow_at") or "",
-                row.get("stage") or "",
-                row.get("notes") or "",
-                saved.get(ticker) or row.get("thesis") or "",
-            ]
-        )
-    return buffer.getvalue()
-
-
-def display_watchlist(rows: list[dict]) -> pd.DataFrame:
-    display: list[dict] = []
-    for row in rows:
-        unknown = row["squeeze_unknown"]
-        squeeze = f"{row['squeeze_met']}/5 met"
-        if unknown:
-            squeeze += f" · {unknown} unknown"
-        display.append(
-            {
-                "Ticker": row["ticker"],
-                "Company": row["name"],
-                "Price": _money(row["price"]) or "Not in snapshot",
-                "Daily trend": trend_text(row["daily_trend"]),
-                "Daily RSI (14)": row["rsi"],
-                "Daily 200-day average": row["average"],
-                "Weekly trend": trend_text(row["weekly_trend"]),
-                "Weekly RSI (14)": row["rsi"],
-                "Weekly 200-day average": row["average"],
-                "Analyst target": _money(row["target"]) or "Not in snapshot",
-                "Upside": _percent(row["upside"], 1, signed=True) or "Not in snapshot",
-                "EPS (TTM)": _money(row["eps"]) or "Not in snapshot",
-                "Forward P/E": _multiple(row["forward_pe"]) or "Not published",
-                "Squeeze": squeeze,
-                "Thesis": row["thesis"] or "No playbook in the repo",
-            }
-        )
-    return pd.DataFrame(display)
-
-
-def valuation_sentence(snapshot: dict) -> str:
-    gap = upside(snapshot)
-    price = _money(snapshot.get("price"))
-    target = _money(snapshot.get("target"))
-    if price and target and gap is not None:
-        text = (
-            f"At {price}, the average analyst target of {target} implies {_percent(gap, 1, signed=True)} upside. "
-            "This is the gap to the stored average target, not a verified margin of safety."
-        )
-    else:
-        text = "The snapshot does not include both a price and an average analyst target, so upside is not shown."
-    eps = snapshot.get("eps")
-    if isinstance(eps, (int, float)) and not isinstance(eps, bool):
-        text += f" Trailing EPS is {_money(eps)}."
-        forward = _multiple(snapshot.get("forwardPE"))
-        if forward:
-            text += f" Forward P/E is {forward}."
-        else:
-            text += " Forward P/E is not in the snapshot."
-    return text
-
-
-def _source_notes(snapshot: dict) -> list[str]:
-    notes: list[str] = []
-    sources = snapshot.get("sources")
-    if not isinstance(sources, dict):
-        return notes
-    for source in sources.values():
-        if isinstance(source, dict) and source.get("error"):
-            name = source.get("name") or "A source"
-            notes.append(f"{name}: {source['error']}")
-    return notes
-
-
-def _watchlist(snapshots: list[dict]) -> tuple[list[dict], dict[str, dict]]:
-    rows = watchlist_rows(snapshots)
-    by_ticker = {str(snapshot.get("ticker")): snapshot for snapshot in snapshots}
-    return rows, by_ticker
-
-
-def _requested_ticker() -> str | None:
-    value = st.query_params.get("ticker")
-    if isinstance(value, list):
-        value = value[0] if value else None
-    if not isinstance(value, str) or not value.strip():
-        return None
-    return value.strip().upper()
-
-
-def _plain_cell(value: object) -> str:
-    return html.escape(str(value).replace("\n", " "))
-
-
-_LOGO_PALETTE: tuple[str, ...] = (
-    "#1b7f4a",
-    "#2563eb",
-    "#7c3aed",
-    "#b45309",
-    "#0e7490",
-    "#be185d",
-    "#4d7c0f",
-    "#334155",
-)
-
-
-def _logo_color(ticker: str) -> str:
-    """Deterministic monogram colour for a ticker, from a small palette."""
-    return _LOGO_PALETTE[sum(ord(char) for char in str(ticker).upper()) % len(_LOGO_PALETTE)]
-
-
-def _logo_html(ticker: str) -> str:
-    """Logo for any ticker from stockanalysis.com, with a monogram fallback.
-
-    The .svg is tried first, then .png; if both fail the image hides and the
-    two-letter monogram on a deterministic colour shows instead. No ticker
-    is hardcoded.
-    """
-    symbol = str(ticker or "").strip().lower()
-    monogram = html.escape(str(ticker or "").strip().upper()[:2])
-    colour = _logo_color(ticker)
-    svg = html.escape(f"https://logos.stockanalysis.com/{symbol}.svg", quote=True)
-    png = html.escape(f"https://logos.stockanalysis.com/{symbol}.png", quote=True)
-    return (
-        f'<span class="desk-logo" style="background:{colour}">{monogram}'
-        f'<img src="{svg}" alt="" loading="lazy" '
-        f"onerror=\"this.onerror=function(){{this.style.display='none'}};this.src='{png}';\" />"
-        "</span>"
-    )
-
-
-def watchlist_html(rows: list[dict]) -> str:
-    """HTML table whose ticker and company are links to that stock."""
-    frame = display_watchlist(rows)
-    headers = "".join(f"<th>{html.escape(name)}</th>" for name in frame.columns)
-    body: list[str] = []
-    for record in frame.to_dict("records"):
-        ticker = html.escape(str(record["Ticker"]), quote=True)
-        href = f"?ticker={ticker}"
-        cells = []
-        for header, value in record.items():
-            text = _plain_cell(value)
-            if header == "Ticker":
-                cells.append(f'<td><a href="{href}" target="_blank" rel="noopener">{_logo_html(str(record["Ticker"]))} {text}</a></td>')
-            elif header == "Company":
-                cells.append(f'<td><a href="{href}" target="_blank" rel="noopener">{text}</a></td>')
-            else:
-                cells.append(f"<td>{text}</td>")
-        body.append("<tr>" + "".join(cells) + "</tr>")
-    return (
-        "<table class=\"desk-watchlist\"><thead><tr>"
-        + headers
-        + "</tr></thead><tbody>"
-        + "".join(body)
-        + "</tbody></table>"
-    )
-
-
-def render_research_desk() -> None:
-    _hydrate_quotes()
-    _auto_refresh_once()
-    # Macro trends belong to the Research Desk, not the Trading Edge tab:
-    # an ?asset= link opens that asset's own macro detail view on its own.
-    if _requested_macro() is not None:
-        render_macro_trends()
-        return
-    ticker = _requested_ticker()
-    if ticker:
-        _render_stock_page(ticker)
-        return
-    render_macro_trends()
-    _render_watchlist()
-
-
-def _auto_refresh_once() -> None:
-    """Refresh once per session when the newest snapshot is older than 6 hours (PR #55).
-
-    Seeded snapshots are dated 2026-10-30, so a first load triggers this.
-    There is no Cloudflare check and no schedule: one refresh, then the flag
-    ``desk_auto_refreshed`` stops it repeating for the session.
-    """
-    if st.session_state.get("desk_auto_refreshed"):
-        return
-    st.session_state.desk_auto_refreshed = True
-    snapshots = _current_snapshots()
-    fetched = [_snapshot_fetched_at(snapshot) for snapshot in snapshots]
-    newest = max((item for item in fetched if item is not None), default=None)
-    if newest is None or datetime.now(timezone.utc) - newest > timedelta(hours=6):
-        _refresh_prices()
-
-
-def _render_watchlist() -> None:
-    st.title("Research Desk")
-    st.caption(
-        "USAR, IBRX, ALMU, NVO, UUUU and SMR start from the seeded snapshots in research-desk/lib/bootstrap.json. "
-        "Add a ticker — by ticker or company name — to fetch a quote from Yahoo Finance and valuation fields from Stock Analysis. "
-        "A figure stays blank when that source does not publish it. "
-        "Names you add, and prices you refresh, stay on this running app until it restarts. "
-        "They are not written back to the repo. "
-        "Thesis text is the ticker playbook in research-desk/lib/research.ts."
-    )
-
-    # One box for adding a ticker: type a ticker (AAPL) or a company name
-    # (NVIDIA) in the same input. There used to be two separate boxes here —
-    # "Add a ticker" and "Search by company name" — and Oliver asked for one.
-    # The "Search watchlist" box further down is untouched: it only filters
-    # the stocks already on the watchlist.
-    query = st.text_input(
-        "Add a ticker — search by ticker or company name",
-        placeholder="AAPL or NVIDIA",
-        key="desk_add_search",
-    )
-    if st.button("Search", key="desk_add_search_button"):
-        _run_add_search(query)
-    search_results = st.session_state.get("desk_search_results") or []
-    if search_results:
-        options = [f"{result.get('symbol')} — {result.get('name')}" for result in search_results if result.get("symbol")]
-        if options:
-            chosen = st.selectbox("Search results", options=options, key="desk_add_search_results")
-            if st.button("Add selected", key="desk_add_search_add"):
-                _add_ticker(str(chosen).split(" — ")[0])
-    elif st.session_state.get("desk_search_results") is not None:
-        st.caption("No companies matched that search.")
-
-    snapshots = _current_snapshots()
-    if not snapshots:
-        st.warning("No seeded snapshots were found in research-desk/lib/bootstrap.json.")
-        return
-
-    _, refresh_col = st.columns([4, 1])
-    with refresh_col:
-        refresh = st.button("Refresh prices", width="stretch")
-    if refresh:
-        _refresh_prices()
-        snapshots = _current_snapshots()
-    for message in st.session_state.get("desk_refresh_errors") or []:
-        st.error(message)
-
-    rows = _watchlist(snapshots)[0]
-    search_col, filter_col, sort_col = st.columns(3)
-    with search_col:
-        watch_query = st.text_input("Search watchlist", placeholder="Ticker or company name", key="desk_watchlist_search")
-    with filter_col:
-        watch_filter = st.selectbox("Filter", options=list(WATCHLIST_FILTERS), key="desk_watchlist_filter")
-    with sort_col:
-        watch_sort = st.selectbox("Sort", options=list(WATCHLIST_SORTS), key="desk_watchlist_sort")
-    shown_rows = filter_watchlist_rows(rows, watch_query, watch_filter, watch_sort)
-    st.download_button(
-        "Export CSV",
-        data=watchlist_csv(shown_rows, st.session_state.get("desk_theses") or {}),
-        file_name="research-desk-watchlist.csv",
-        mime="text/csv",
-    )
-    if not shown_rows:
-        st.caption("No stocks match the current search and filter.")
+    if not info.get("available"):
+        st.warning(f"{item['label']} trend and price could not be loaded from Yahoo Finance.")
+    price = info.get("price")
+    change = _percent(info.get("change_pct"), 2, signed=True) or ""
+    price_text = f"{price:,.1f}" if isinstance(price, (int, float)) else "—"
     st.markdown(
-        """
-        <style>
-        table.desk-watchlist { width: 100%; border-collapse: collapse; font-size: 0.92rem; }
-        table.desk-watchlist th, table.desk-watchlist td {
-          text-align: left; padding: 0.45rem 0.4rem;
-          border-bottom: 1px solid rgba(128,128,128,0.28); vertical-align: top;
-        }
-        table.desk-watchlist a { font-weight: 650; }
-        .desk-logo {
-          position: relative; display: inline-flex; align-items: center; justify-content: center;
-          width: 1.6rem; height: 1.6rem; border-radius: 0.35rem; color: #fff;
-          font-size: 0.65rem; font-weight: 700; vertical-align: middle; margin-right: 0.3rem;
-          overflow: hidden; flex: none;
-        }
-        .desk-logo img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; background: #fff; }
-        .macro-news { font-size: 0.85rem; line-height: 1.4; margin-top: 0.3rem; }
-        .macro-news a { font-weight: 400; }
-        </style>
-        """,
+        f'<div class="md-hero" style="background:{item["gradient"]}">'
+        f'<span class="md-hero-flag">{item["flag"]} {item["id"].upper()}</span>'
+        f'<h2>{html.escape(item["name"])}</h2>'
+        f'<div class="md-hero-price">{price_text} {change}</div>'
+        f'<div class="md-skyline" aria-hidden="true">▂▃▄▅▆▇█▇▆▅▄▃▂</div></div>',
         unsafe_allow_html=True,
     )
-    st.markdown(watchlist_html(shown_rows), unsafe_allow_html=True)
-    st.caption(
-        "Click a ticker or company to open that stock on its own page. "
-        "Daily trend is Up when the latest close is higher than each of the previous three daily closes, and Down when it is lower than each of them. Otherwise it is Flat. "
-        "Weekly trend compares this week's close with the previous week's close: Up when it is higher, Down when it is lower, and Flat when they are equal. "
-        "RSI (14) and the 200-day moving average are daily readings, shown on the daily view and the weekly view. "
-        "The 200-day average needs 200 stored daily closes. "
-        "Upside is the average analyst target divided by the price, minus one. "
-        "The squeeze column counts how many of the five repo heuristics are met. Unknown inputs stay unknown and are not treated as zero."
+    closes = info.get("closes60") or []
+    dates = info.get("dates60") or []
+    st.markdown("**Price — 60 sessions**")
+    if closes:
+        chart = pd.DataFrame({"Close": closes}, index=dates if len(dates) == len(closes) else None)
+        st.line_chart(chart, height=220)
+    else:
+        st.caption("Price chart unavailable — no daily closes were published.")
+    st.markdown(
+        '<div class="md-pills">' + _pill("Weekly", info.get("weekly_trend")) + _pill("Daily", info.get("daily_trend")) + _pill("4H", info.get("four_hour_trend")) + "</div>",
+        unsafe_allow_html=True,
     )
-    st.info("Click a stock in the table to open its thesis and short-squeeze checks on a new page.")
-
-
-def _remember_quotes() -> None:
+    st.caption("Trend: Bullish if the latest close is above the 50-period EMA and the 50 EMA is rising, otherwise Bearish (spec section 4).")
+    st.markdown("## Recent news")
     try:
-        save_quote_cache(
-            {
-                "refreshed": st.session_state.desk_refreshed,
-                "added": st.session_state.desk_added,
-                "refresh_at": st.session_state.get("desk_refresh_at"),
-                "errors": st.session_state.get("desk_refresh_errors") or [],
-                "theses": st.session_state.get("desk_theses") or {},
-            }
-        )
-    except OSError:
-        st.warning("The new prices are showing, but they could not be saved for the next page load.")
+        news = fetch_news_rss(f"{item['label']} {item['name']} market news") or []
+    except Exception:
+        news = []
+    if not news:
+        st.caption("News unavailable.")
+    for entry in news[:10]:
+        if not isinstance(entry, dict) or not entry.get("title") or not entry.get("url"):
+            continue
+        title = html.escape(str(entry["title"]))
+        url = html.escape(str(entry["url"]), quote=True)
+        meta = " · ".join(part for part in (str(entry.get("date") or ""), str(entry.get("source") or "")) if part)
+        st.markdown(f'<div class="md-news-item"><a href="{url}" target="_blank" rel="noopener">{title}</a><div class="md-news-meta">{html.escape(meta)}</div></div>', unsafe_allow_html=True)
+    st.markdown("## Underlying breadth")
+    breadth = info.get("breadth") or {}
+    if not breadth.get("ready"):
+        st.caption("Breadth unavailable — not enough constituent quotes were published to calculate it.")
+    else:
+        listed = int(breadth.get("listed") or 0)
+        above = int(breadth.get("above50") or 0)
+        highs = int(breadth.get("new_highs") or 0)
+        above_pct = (above / listed * 100) if listed else 0
+        high_pct = (highs / listed * 100) if listed else 0
+        st.markdown(f"Above 50-day MA <span class='md-breadth-num' style='float:right'>{above} / {listed}</span>", unsafe_allow_html=True)
+        st.markdown(f'<div class="md-gauge-track" style="height:10px"><div class="md-gauge-fill" style="width:{above_pct:.0f}%;background:#2563eb"></div></div>', unsafe_allow_html=True)
+        st.markdown(f"New highs vs previous day <span class='md-breadth-num' style='float:right'>{highs} / {listed}</span>", unsafe_allow_html=True)
+        st.markdown(f'<div class="md-gauge-track" style="height:10px"><div class="md-gauge-fill" style="width:{high_pct:.0f}%;background:#15803d"></div></div>', unsafe_allow_html=True)
+        st.caption(f"Coverage: {breadth.get('measured')} of {listed} listed constituents measured. A constituent with no usable closes is left out of both counts.")
+        top = breadth.get("top") or []
+        if top:
+            st.markdown("**Top weights**")
+            st.caption("First constituents as listed by the source — index weights are not published by this source, so this is source order, not a weight ranking.")
+            rows = []
+            for entry in top:
+                rows.append({"Constituent": entry.get("name") or entry.get("symbol"), ">50MA": "●" if entry.get("above50") else "○", "New high": "●" if entry.get("new_high") else "○"})
+            st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+    render_red_folder_list(calendar, index_id)
 
 
-def _hydrate_quotes() -> None:
-    if st.session_state.get("desk_hydrated"):
+# ---------------------------------------------------------------------------
+# Watchlist (spec 3.4)
+# ---------------------------------------------------------------------------
+
+def load_watchlist_cache(path: Path | None = None) -> dict:
+    """Watchlist snapshots saved on this running app, or {} when none."""
+    target = path or QUOTE_CACHE_PATH
+    try:
+        payload = json.loads(target.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def save_watchlist_cache(payload: dict, path: Path | None = None) -> None:
+    target = path or QUOTE_CACHE_PATH
+    target.write_text(json.dumps(payload), encoding="utf-8")
+
+
+def _hydrate_watchlist() -> None:
+    if st.session_state.get("macro_hydrated"):
         return
-    cached = load_quote_cache()
-    st.session_state.desk_refreshed = cached.get("refreshed") or {}
-    st.session_state.desk_added = cached.get("added") or {}
-    st.session_state.desk_refresh_at = cached.get("refresh_at")
-    st.session_state.desk_refresh_errors = cached.get("errors") or []
-    st.session_state.desk_theses = cached.get("theses") or {}
-    st.session_state.desk_hydrated = True
+    cached = load_watchlist_cache()
+    st.session_state.macro_added = cached.get("added") or {}
+    st.session_state.macro_hydrated = True
 
 
-def _current_snapshots() -> list[dict]:
-    overrides = st.session_state.get("desk_refreshed") or {}
-    combined = [*load_snapshots(), *st.session_state.desk_added.values()]
-    current: list[dict] = []
-    for snapshot in combined:
-        ticker = str(snapshot.get("ticker") or "")
-        current.append(overrides.get(ticker, snapshot))
-    return current
+def _remember_watchlist() -> None:
+    try:
+        save_watchlist_cache({"added": st.session_state.get("macro_added") or {}})
+    except OSError:
+        st.warning("The new watchlist is showing, but it could not be saved for the next page load.")
 
 
-def _refresh_prices() -> None:
-    """Refresh every watchlist price concurrently (PR #56), skipping stocks refreshed in the last 5 minutes."""
-    current = _current_snapshots()
-    refreshed = dict(st.session_state.desk_refreshed)
-    errors: list[str] = []
-    updated = 0
-    skipped = 0
+def _watchlist_row(snapshot: dict) -> dict:
+    """One watchlist row, with every spec column populated from the snapshot.
 
-    def one(snapshot: dict) -> tuple[str, dict | QuoteError | None, bool]:
-        ticker = str(snapshot.get("ticker") or "")
-        if _is_fresh(snapshot):
-            return ticker, None, True
-        try:
-            return ticker, refresh_quote(snapshot), False
-        except QuoteError as exc:
-            return ticker, exc, False
+    50MA / 200MA come from the stored daily closes; weekly and daily
+    trends are the spec's EMA50 trend on weekly-aggregated and daily
+    closes. A missing input stays blank, never zero.
+    """
+    closes = [float(c) for c in (snapshot.get("closes") or []) if isinstance(c, (int, float)) and not isinstance(c, bool)]
+    price = snapshot.get("price") if isinstance(snapshot.get("price"), (int, float)) else None
+    target = snapshot.get("target") if isinstance(snapshot.get("target"), (int, float)) else None
+    upside = (target / price - 1) * 100 if price and target and price > 0 else None
+    forward_pe = snapshot.get("forwardPE") if isinstance(snapshot.get("forwardPE"), (int, float)) else None
+    if forward_pe is None and price is not None and isinstance(snapshot.get("eps"), (int, float)) and snapshot.get("eps"):
+        forward_pe = price / float(snapshot["eps"])
+    average50 = sma(closes, 50)
+    average200 = sma(closes, 200)
+    weekly_closes = weekly_closes_from_daily(snapshot.get("closeDates") or [], closes)
+    return {
+        "ticker": snapshot.get("ticker"),
+        "name": snapshot.get("name"),
+        "parent": parent_index(str(snapshot.get("ticker") or "")),
+        "price": price,
+        "currency": snapshot.get("currency"),
+        "target": target,
+        "upside": upside,
+        "above50": None if average50 is None or price is None else price > average50,
+        "above200": None if average200 is None or price is None else price > average200,
+        "weekly": trend_from_closes(weekly_closes, TREND_EMA_PERIOD),
+        "daily": trend_from_closes(closes, TREND_EMA_PERIOD),
+        "forward_pe": forward_pe,
+    }
 
-    with st.spinner("Refreshing prices from Yahoo Finance…"):
-        with ThreadPoolExecutor(max_workers=4) as pool:
-            outcomes = list(pool.map(one, current))
-    for ticker, result, was_skipped in outcomes:
-        if was_skipped:
-            skipped += 1
-            continue
-        if isinstance(result, QuoteError):
-            errors.append(str(result))
-            continue
-        if result is None:
-            continue
-        refreshed[ticker] = result
-        updated += 1
-        if ticker in st.session_state.desk_added:
-            st.session_state.desk_added[ticker] = result
-    st.session_state.desk_refreshed = refreshed
-    st.session_state.desk_refresh_errors = errors
-    if updated:
-        st.session_state.desk_refresh_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-        message = f"Updated {updated} price{'s' if updated != 1 else ''}."
-        if skipped:
-            message += f" Skipped {skipped} refreshed within the last 5 minutes."
-        st.success(message)
-    elif not errors:
-        if skipped:
-            st.info(f"All {skipped} price{'s' if skipped != 1 else ''} were refreshed within the last 5 minutes, so nothing was re-fetched.")
-        else:
-            st.warning("There are no stocks to refresh.")
-    _remember_quotes()
+
+def _currency_symbol(currency: str | None) -> str:
+    return {"USD": "$", "EUR": "€", "GBP": "£"}.get(currency or "", "$")
 
 
 def _run_add_search(query: str) -> None:
-    """Search the single add box, then add or offer a match.
+    """One box: type a ticker (AAPL) or a company name (NVIDIA) to add it.
 
-    A known ticker typed on its own (AAPL) is added straight away when the
+    A known ticker typed on its own is added straight away when the
     Yahoo symbol search returns it as an exact match. A company name
-    (NVIDIA) has no exact symbol, so its matches are shown in the results
-    list below the box for Oliver to pick from. If the search returns
-    nothing at all, a ticker-looking query falls back to the direct add
-    path, so a valid ticker still adds even when the search feed fails.
-    Results are kept in ``desk_search_results`` until the next search.
+    has no exact symbol, so its matches are shown below the box to pick
+    from. If the search returns nothing at all, a ticker-looking query
+    falls back to the direct add path.
     """
     text = (query or "").strip()
     if not text:
-        st.session_state.desk_search_results = None
+        st.session_state.macro_search_results = None
         st.error("Enter a ticker or a company name to search.")
         return
     with st.spinner(f"Searching for {text}…"):
@@ -1822,25 +846,21 @@ def _run_add_search(query: str) -> None:
         except Exception as exc:
             results = []
             st.error(f"Search failed: {exc}")
-    exact = [result for result in results if str(result.get("symbol") or "").upper() == text.upper()]
+    exact = [r for r in results if str(r.get("symbol") or "").upper() == text.upper()]
     if exact:
-        # A ticker on its own: add it directly, no extra click needed.
-        st.session_state.desk_search_results = None
+        st.session_state.macro_search_results = None
         _add_ticker(str(exact[0].get("symbol")))
         return
     if not results:
-        # No matches at all: a ticker-looking query still gets the direct
-        # add path (so a valid ticker adds even when the search feed fails);
-        # anything else just shows "no companies matched".
         try:
             normalize_ticker(text)
         except QuoteError:
-            st.session_state.desk_search_results = []
+            st.session_state.macro_search_results = []
             return
-        st.session_state.desk_search_results = None
+        st.session_state.macro_search_results = None
         _add_ticker(text)
         return
-    st.session_state.desk_search_results = results
+    st.session_state.macro_search_results = results
 
 
 def _add_ticker(raw: str) -> None:
@@ -1849,7 +869,7 @@ def _add_ticker(raw: str) -> None:
     except QuoteError as exc:
         st.error(str(exc))
         return
-    existing = {str(row.get("ticker")) for row in load_snapshots()} | set(st.session_state.desk_added)
+    existing = set(st.session_state.get("macro_added") or {})
     if ticker in existing:
         st.error(f"{ticker} is already on the watchlist.")
         return
@@ -1862,219 +882,157 @@ def _add_ticker(raw: str) -> None:
         except QuoteError as exc:
             st.error(str(exc))
             return
-    st.session_state.desk_added[ticker] = snapshot
-    _remember_quotes()
+    st.session_state.macro_added[ticker] = snapshot
+    _remember_watchlist()
     st.success(f"Added {ticker}. Blank fields were not published by the source.")
 
 
-def _view_lines(snapshot: dict, trend: str | None) -> None:
-    st.write(f"Trend: {trend_text(trend)}.")
-    st.write(f"RSI (14): {rsi_text(snapshot)}.")
-    st.write(f"200-day moving average: {average_text(snapshot)}.")
+def _remove_ticker(ticker: str) -> None:
+    added = dict(st.session_state.get("macro_added") or {})
+    added.pop(ticker, None)
+    st.session_state.macro_added = added
+    _remember_watchlist()
 
 
-def _render_closes(snapshot: dict) -> None:
-    window = st.radio(
-        "Daily closes",
-        options=list(CLOSE_WINDOWS),
-        index=CLOSE_WINDOWS.index(DEFAULT_CLOSE_WINDOW),
-        format_func=lambda days: {"90": "3M", "365": "1Y", "1825": "5Y"}.get(str(days), f"{days} days"),
-        horizontal=True,
-        key="desk_close_window",
-    )
-    closes, close_dates = close_window(snapshot, int(window))
-    if not closes:
-        st.caption("No daily closes are stored for this stock.")
+def _render_watchlist() -> None:
+    st.markdown("## Watchlist")
+    query = st.text_input("Add a stock — search by ticker or company name", placeholder="NVDA, SAP, Shell…", key="macro_add_search")
+    if st.button("Search", key="macro_add_search_button"):
+        _run_add_search(query)
+    results = st.session_state.get("macro_search_results") or []
+    if results:
+        options = [f"{r.get('symbol')} — {r.get('name')}" for r in results if r.get("symbol")]
+        if options:
+            chosen = st.selectbox("Search results", options=options, key="macro_add_search_results")
+            if st.button("Add selected", key="macro_add_search_add"):
+                _add_ticker(str(chosen).split(" — ")[0])
+    elif st.session_state.get("macro_search_results") is not None:
+        st.caption("No companies matched that search.")
+    added = st.session_state.get("macro_added") or {}
+    if not added:
+        st.caption("Your watchlist is empty – search above to add a stock.")
         return
-    chart = pd.DataFrame({"Close": closes})
-    if close_dates is not None:
-        chart.index = close_dates
-        st.line_chart(chart, height=180)
-        st.caption(f"Closes from the last {int(window)} days. This is not a forecast.")
-    else:
-        st.line_chart(chart, height=180)
-        st.caption("Close dates are not stored, so the 3M, 1Y and 5Y choices cannot be applied.")
-    returns: list[str] = []
-    for days, label in ((365, "1-year"), (1825, "5-year")):
-        value = _return_over_days(snapshot, days)
-        if value is not None:
-            returns.append(f"{label} return {_percent(value, 1, signed=True)}")
-    if returns:
-        st.caption(" · ".join(returns) + ". Date-anchored on the latest stored close.")
+    rows = [_watchlist_row(snapshot) for snapshot in added.values()]
+    rows.sort(key=lambda row: str(row.get("ticker") or ""))
+    header = "<tr><th>Stock</th><th>Price</th><th>Analyst target</th><th>50MA</th><th>200MA</th><th>Weekly</th><th>Daily</th><th>Fwd P/E</th><th></th></tr>"
+    body_rows: list[str] = []
+    for row in rows:
+        ticker = str(row.get("ticker") or "")
+        symbol = _currency_symbol(row.get("currency"))
+        price = _money(row.get("price"), symbol) or "—"
+        if row.get("target") is not None:
+            target = _money(row.get("target"), symbol) or "—"
+            upside_text = _percent(row.get("upside"), 1, signed=True) or ""
+            upside_class = "md-up" if (row.get("upside") or 0) >= 0 else "md-down"
+            target_cell = f"{target}<br><span class='{upside_class}'>{html.escape(upside_text)}</span>"
+        else:
+            target_cell = "—"
+        def above_below(value: bool | None) -> str:
+            if value is None:
+                return "—"
+            return '<span class="md-up">Above</span>' if value else '<span class="md-down">Below</span>'
+        def bull_bear(value: str | None) -> str:
+            if value == "Bullish":
+                return '<span class="md-up">Bullish</span>'
+            if value == "Bearish":
+                return '<span class="md-down">Bearish</span>'
+            return "—"
+        forward_pe = f"{row['forward_pe']:.1f}x" if isinstance(row.get("forward_pe"), (int, float)) else "n/m"
+        parent = f" · {row['parent']}" if row.get("parent") else ""
+        body_rows.append(
+            f"<tr><td><a href='?stock={urllib.parse.quote(ticker)}' target='_self'><strong>{html.escape(ticker)}</strong></a><br>"
+            f"{html.escape(str(row.get('name') or ''))}{html.escape(parent)}</td>"
+            f"<td class='md-mono'>{price}</td><td class='md-mono'>{target_cell}</td>"
+            f"<td>{above_below(row.get('above50'))}</td><td>{above_below(row.get('above200'))}</td>"
+            f"<td>{bull_bear(row.get('weekly'))}</td><td>{bull_bear(row.get('daily'))}</td>"
+            f"<td class='md-mono'>{forward_pe}</td><td></td></tr>"
+        )
+    st.markdown(MACRO_CSS + f'<div style="overflow-x:auto"><table class="md-watchlist">{header}{"".join(body_rows)}</table></div>', unsafe_allow_html=True)
+    for row in rows:
+        ticker = str(row.get("ticker") or "")
+        if st.button("✕", key=f"macro_remove_{ticker}", help=f"Remove {ticker} from the watchlist"):
+            _remove_ticker(ticker)
+            st.rerun()
+    st.caption("Click a stock to open its page. Or select an index above for its chart, news, red folder events and constituents.")
 
 
-def _render_stock_page(ticker: str) -> None:
-    """The stock on its own, without the watchlist."""
-    st.markdown(
-        '<p><a href="/research-desk" target="_self">Back to the watchlist</a></p>',
-        unsafe_allow_html=True,
-    )
-    snapshot = next((row for row in _current_snapshots() if str(row.get("ticker")) == ticker), None)
-    if snapshot is None:
-        st.warning(f"{ticker} is not on the watchlist.")
+def _render_stock_placeholder(ticker: str) -> None:
+    """Stock detail placeholder (spec 3.4) — design to be supplied later."""
+    if st.button("← Back to the watchlist", key="macro_stock_back"):
+        st.query_params.clear()
+        st.rerun()
+    added = st.session_state.get("macro_added") or {}
+    snapshot = added.get(ticker.upper())
+    st.markdown(f"## {html.escape(ticker.upper())}")
+    if snapshot is not None:
+        price = snapshot.get("price")
+        st.write(f"Price: {_money(price, _currency_symbol(snapshot.get('currency'))) or '—'}")
+        if snapshot.get("name"):
+            st.write(str(snapshot["name"]))
+    st.info("To be designed – coming soon")
+
+
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
+
+def _requested_index() -> str | None:
+    value = st.query_params.get("index")
+    if isinstance(value, list):
+        value = value[0] if value else None
+    if not isinstance(value, str) or not value.strip():
+        return None
+    wanted = value.strip().lower()
+    return wanted if wanted in INDEX_BY_ID else None
+
+
+def _requested_stock() -> str | None:
+    value = st.query_params.get("stock")
+    if isinstance(value, list):
+        value = value[0] if value else None
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        return normalize_ticker(value)
+    except QuoteError:
+        return None
+
+
+def render_macro_desk() -> None:
+    """Macro Desk home, index and stock pages. The top strip and the
+    red-folder calendar are visible on every page (spec section 3)."""
+    _hydrate_watchlist()
+    if "macro_theme" not in st.session_state:
+        st.session_state.macro_theme = "Light"
+    theme = st.radio("Theme", options=["Light", "Dark"], index=0 if st.session_state.macro_theme == "Light" else 1, horizontal=True, key="macro_theme_radio")
+    st.session_state.macro_theme = theme
+    # The manual toggle only restyles this page's own cards and pills;
+    # Streamlit's own chrome follows the system theme.
+    if theme == "Dark":
+        st.markdown("<style>.md-card{background:#1f2937;color:#f9fafb} .md-card a{color:#f9fafb} .md-pill.md-missing{color:#d1d5db}</style>", unsafe_allow_html=True)
+    index_id = _requested_index()
+    stock = _requested_stock()
+    try:
+        calendar = cached_red_folder()
+    except Exception:
+        calendar = {"events": [], "available": False, "partial": False}
+    data = render_strip(active_id=index_id)
+    render_event_detail()
+    render_calendar(calendar, index_id=index_id)
+    if stock is not None:
+        _render_stock_placeholder(stock)
         return
-    _render_detail(snapshot)
-
-
-def _render_detail(snapshot: dict) -> None:
-    ticker = str(snapshot.get("ticker"))
-    st.title(f"{ticker} · {snapshot.get('name') or 'Name not in snapshot'}")
-
-    gap = upside(snapshot)
-    large_gap = gap is not None and gap >= 50
-    checks = squeeze_checks(snapshot)
-    met = sum(1 for check in checks if check["passed"])
-    unknown = sum(1 for check in checks if not check["known"])
-
-    metrics = st.columns(6)
-    metrics[0].metric("Price", _money(snapshot.get("price")) or "—")
-    target_help = None
-    analyst_count = snapshot.get("analystCount")
-    if isinstance(analyst_count, (int, float)) and not isinstance(analyst_count, bool):
-        shown_count = int(analyst_count) if float(analyst_count).is_integer() else analyst_count
-        consensus = snapshot.get("consensus")
-        target_help = f"{shown_count} analysts"
-        if isinstance(consensus, str) and consensus:
-            target_help += f" · {consensus}"
-    metrics[1].metric("Analyst target", _money(snapshot.get("target")) or "—", help=target_help)
-    metrics[2].metric("Upside", _percent(gap, 1, signed=True) or "—", help="Large target gap" if large_gap else "Below 50% versus the stored average target")
-    metrics[3].metric("EPS (TTM)", _money(snapshot.get("eps")) or "—")
-    metrics[4].metric(
-        "Forward P/E",
-        _multiple(snapshot.get("forwardPE")) or "N/A",
-        help=None if _multiple(snapshot.get("forwardPE")) else "Not published in this snapshot",
-    )
-    metrics[5].metric(
-        "Short squeeze",
-        f"{met}/5",
-        help=f"{unknown} unknown" if unknown else "All five inputs are stored on this snapshot",
-    )
-
-    _render_stock_spider(snapshot)
-
-    st.markdown("**Daily**")
-    _view_lines(snapshot, daily_trend(snapshot))
-    _render_closes(snapshot)
-
-    st.markdown("**Weekly**")
-    _view_lines(snapshot, weekly_trend(snapshot))
-
-    st.markdown("**Headlines**")
-    headlines = snapshot.get("headlines") if isinstance(snapshot.get("headlines"), list) else []
-    if headlines:
-        for item in headlines[:5]:
-            if not isinstance(item, dict) or not item.get("title") or not item.get("url"):
-                continue
-            title = html.escape(str(item["title"]))
-            url = html.escape(str(item["url"]), quote=True)
-            date_text = f" ({html.escape(str(item['date']))})" if item.get("date") else ""
-            st.markdown(f"- [{title}]({url}){date_text}")
-    else:
-        st.caption("Headlines are unavailable / not yet fetched for this stock.")
-
-    st.markdown("**Insider trades**")
-    trades = snapshot.get("insiderTrades") if isinstance(snapshot.get("insiderTrades"), list) else []
-    if trades:
-        insider_rows = []
-        for trade in trades:
-            if not isinstance(trade, dict):
-                continue
-            insider_rows.append(
-                {
-                    "Date": trade.get("date") or "",
-                    "Insider": trade.get("insider") or "",
-                    "Type": trade.get("type") or "",
-                    "Shares": trade.get("shares") or "",
-                    "Entry price": _money(trade.get("price")) or "",
-                }
-            )
-        st.dataframe(pd.DataFrame(insider_rows), use_container_width=True, hide_index=True)
-    else:
-        sources = snapshot.get("sources") if isinstance(snapshot.get("sources"), dict) else {}
-        insider_source = sources.get("insider") if isinstance(sources.get("insider"), dict) else {}
-        if insider_source.get("error"):
-            st.caption(f"Insider trades: {insider_source['error']}")
-        else:
-            st.caption("No insider trades returned.")
+    if index_id is not None:
+        render_index_page(index_id, data, calendar)
+        return
+    _render_watchlist()
     st.caption(
-        "Politician/congressional trades are not available — there is no free structured feed, "
-        "and disclosures are typically value ranges with no exact entry price."
+        "Trend: Bullish if the latest close is above the 50-period EMA and the 50 EMA is rising, otherwise Bearish. "
+        "Breadth and trends are recalculated at most every 5 minutes for indices and every 30 minutes for breadth. "
+        "Red-folder events are high-impact only, from the Forex Factory calendar, in UK time. "
+        "Watchlist names you add stay on this running app until it restarts; they are not written back to the repo."
     )
 
-    thesis = thesis_for(ticker)
-    st.markdown("**Thesis**")
-    if thesis is None:
-        st.info("This ticker has numbers in the snapshot and no matching playbook in research-desk/lib/research.ts.")
-    else:
-        st.markdown(f"**{thesis['title']}**")
-        st.write(thesis["case"])
-        st.write(valuation_sentence(snapshot))
-        st.markdown("**What the playbook says to verify**")
-        st.write(thesis["proof"])
-        st.markdown("**Invalidation**")
-        st.write(thesis["invalid"])
 
-    saved_theses = st.session_state.get("desk_theses") or {}
-    stored_thesis = saved_theses.get(ticker, "")
-    typed_thesis = st.text_area("Thesis", value=stored_thesis, key=f"desk_thesis_{ticker}", height=120)
-    if st.button("Save thesis", key=f"desk_thesis_save_{ticker}"):
-        updated_theses = dict(st.session_state.get("desk_theses") or {})
-        updated_theses[ticker] = typed_thesis
-        st.session_state.desk_theses = updated_theses
-        _remember_quotes()
-        st.success("Thesis saved.")
-    saved_now = (st.session_state.get("desk_theses") or {}).get(ticker, "")
-    if typed_thesis == saved_now and saved_now:
-        st.caption("Saved.")
-    elif typed_thesis == saved_now:
-        st.caption("No thesis saved yet.")
-    else:
-        st.caption("Unsaved changes.")
-    st.caption(
-        "Discuss your thesis with Muse in chat and Muse adds it here. "
-        "It is speculation, not sourced data, and not the automatic playbook thesis above."
-    )
-
-    range_bits: list[str] = []
-    for label, key in (("Low", "targetLow"), ("Median", "targetMedian"), ("High", "targetHigh")):
-        shown = _money(snapshot.get(key))
-        if shown:
-            range_bits.append(f"{label} {shown}")
-    if range_bits:
-        st.caption("Stored target range: " + " · ".join(range_bits) + ". The watchlist target is the average, not this range.")
-    if isinstance(snapshot.get("earningsDate"), str):
-        st.caption(f"Earnings date stored in the snapshot: {snapshot['earningsDate']}.")
-
-    st.markdown("**Short squeeze**")
-    st.caption("Five research heuristics from the repo. They are not a squeeze probability.")
-    squeeze_rows = []
-    for check in checks:
-        if not check["known"]:
-            state = "Unknown"
-            shown = "Not in snapshot"
-        else:
-            state = "Met" if check["passed"] else "Not met"
-            key = check["key"]
-            if key == "shortFloatPct":
-                shown = _percent(check["value"], 1) or "Not in snapshot"
-            elif key == "borrowFee":
-                shown = _percent(check["value"], 2) or "Not in snapshot"
-            elif key == "relativeVolume":
-                shown = f"{float(check['value']):.2f}×"
-            elif key == "available":
-                shown = f"{int(check['value']):,}"
-            else:
-                shown = _count(check["value"]) or "Not in snapshot"
-        squeeze_rows.append({"Check": check["label"], "Stored value": shown, "Result": state})
-    st.dataframe(pd.DataFrame(squeeze_rows), use_container_width=True, hide_index=True)
-
-    extra: list[str] = []
-    if isinstance(snapshot.get("shortDate"), str):
-        extra.append(f"Short-interest date in the snapshot: {snapshot['shortDate']}.")
-    if snapshot.get("floatDisagreement") is True:
-        extra.append("The snapshot flags a disagreement between float estimates.")
-    elif snapshot.get("floatDisagreement") is False:
-        extra.append("The snapshot does not flag a float-estimate disagreement.")
-    notes = _source_notes(snapshot)
-    for note in extra + notes:
-        st.caption(note)
+# Backwards-compatible name: app.py used to import render_research_desk.
+render_research_desk = render_macro_desk
