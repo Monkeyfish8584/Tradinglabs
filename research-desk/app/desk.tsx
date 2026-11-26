@@ -109,11 +109,23 @@ export default function Desk() {
     }catch(e){if(!silent)notify((e as Error).message,true);return {failed:true}}
     finally{setBusy(prev=>{const n=new Set(prev);n.delete(stock.ticker);return n})}
   }
+  // Concurrent refresh: a bounded pool of 4 workers refreshes the watchlist
+  // in parallel instead of one stock at a time. Stocks refreshed within the
+  // last 5 minutes are skipped (the API also throttles per stock at 20s).
+  // No Cloudflare schedule — this is client-side concurrency only.
   async function refreshAll(){
     if(allRefreshing||busy.size)return;
-    setAllRefreshing(true);let failures=0;
-    for(let i=0;i<stocks.length;i++){setRefreshProgress(`${i+1} of ${stocks.length} · ${stocks[i].ticker}`);if((await refreshOne(stocks[i],true)).failed)failures++}
-    setAllRefreshing(false);setRefreshProgress("");notify(failures?`Refresh finished. ${failures} stock${failures>1?"s have":" has"} unavailable sources; check Data & sources.`:`All ${stocks.length} stocks refreshed.`,!!failures);
+    setAllRefreshing(true);
+    const freshCutoff=Date.now()-5*60*1000;
+    const due=stocks.filter(s=>{const ts=Date.parse(s.snapshot.attemptedAt||"");return !ts||ts<freshCutoff});
+    const skipped=stocks.length-due.length;
+    let failures=0,done=0;
+    const showProgress=()=>setRefreshProgress(due.length?`${done} of ${stocks.length} · ${due[Math.min(done,due.length-1)].ticker}${skipped?` · ${skipped} skipped (fresh)`:""}`:`${stocks.length} of ${stocks.length} · all fresh`);
+    showProgress();
+    let next=0;
+    const worker=async()=>{while(next<due.length){const stock=due[next++];if((await refreshOne(stock,true)).failed)failures++;done++;showProgress()}};
+    await Promise.all(Array.from({length:Math.min(4,due.length)},()=>worker()));
+    setAllRefreshing(false);setRefreshProgress("");notify(failures?`Refresh finished. ${failures} stock${failures>1?"s have":" has"} unavailable sources; check Data & sources.`:`All ${stocks.length} stocks refreshed${skipped?` (${skipped} already fresh, skipped)`:"."}`,!!failures);
   }
   async function add(e:React.FormEvent){e.preventDefault();const t=ticker.trim().toUpperCase();if(!t)return;setAddError("");setBusy(prev=>new Set(prev).add("adding"));try{await action({action:"add",ticker:t});setAdding(false);setTicker("");setSelected(t);notify(`${t} added with its research draft.`)}catch(e){setAddError((e as Error).message)}finally{setBusy(prev=>{const n=new Set(prev);n.delete("adding");return n})}}
   function navigate(v:View){setView(v);setQuery("");setFilter("All stocks");setSort(v==="squeeze"?"pressure":"upside")}
