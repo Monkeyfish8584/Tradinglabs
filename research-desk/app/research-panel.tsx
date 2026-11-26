@@ -1,7 +1,7 @@
 "use client";
 import {ArrowUpRight,BookOpen,Check,ChevronRight,Clock3,ExternalLink,RefreshCw,TrendingUp} from 'lucide-react';
 import {composeResearch} from '../lib/research';
-import {effective,type SpeculativeDraft,type Stock} from '../lib/model';
+import {effective,type Stock} from '../lib/model';
 const n=(v:number|undefined)=>v==null?'—':v.toFixed(2);
 const p=(v:number|undefined)=>v==null?'—':`${v>0?'+':''}${v.toFixed(1)}%`;
 const date=(v?:string)=>v?new Date(v).toLocaleString('en-GB',{timeZone:'Europe/London',day:'numeric',month:'short',year:'numeric',hour:'2-digit',minute:'2-digit'}):'Unavailable';
@@ -22,23 +22,14 @@ function Radar({scores}:{scores:NonNullable<import('../lib/model').Research['rad
     {available.length>=3&&<polygon points={pts} fill="rgba(31,111,84,0.18)" stroke="#1f6f54" strokeWidth="2"/>}
   </svg><table className="radar-table"><tbody>{scores.map(a=><tr key={a.axis}><td>{a.axis}</td><td><strong>{a.score==null?'Unavailable':`${a.score}/10`}</strong></td><td className="muted">{a.note}</td></tr>)}</tbody></table></div>;
 }
-const SPECULATIVE_FIELDS: {key:keyof SpeculativeDraft;label:string;placeholder:string;rows:number}[]=[
- {key:"idea",label:"Your idea, in your own words",placeholder:"What do you think is going to happen here, and why? Say it how you would say it.",rows:4},
- {key:"hasToGoRight",label:"What has to go right",placeholder:"The two or three things that need to happen for this to work.",rows:3},
- {key:"proveWrong",label:"What would prove it wrong",placeholder:"The evidence that would make you drop the idea.",rows:3},
- {key:"biggestRisk",label:"Biggest risk",placeholder:"The one risk that worries you most.",rows:3},
- {key:"catalyst",label:"Catalyst — what changes the view",placeholder:"The event, result or date that would confirm the idea — or kill it.",rows:3},
- {key:"museChallenge",label:"Muse's challenge",placeholder:"Where the idea is weakest, what to check, and the counter-argument.",rows:3},
- {key:"museDetail",label:"Muse's added detail / evidence",placeholder:"Detail and evidence Muse added while discussing the idea — with sources where they exist.",rows:3},
-];
-function SpeculativeThesis({ticker,draft,onChange,onSave,saving,dirty}:{ticker:string;draft:SpeculativeDraft;onChange:(d:SpeculativeDraft)=>void;onSave:()=>void;saving:boolean;dirty:boolean}){
- return <section className="thesis-section speculative-section"><div className="section-title"><h3>Draft it together — speculative thesis</h3><span className="pill amber">Speculative · your working idea</span></div>
-  <p className="muted">Your working idea for {ticker}, drafted together with Muse: you put the idea in your own words, Muse challenges it and adds detail. This is speculation, not sourced data and not the automatic thesis above — the automatic draft, bull/bear case and CANSLIM are untouched. Saved with your research notes, and a refresh never overwrites it.</p>
-  {SPECULATIVE_FIELDS.map(f=><div key={f.key}><label className="field-label" htmlFor={`spec-${f.key}`}>{f.label}</label><textarea className="input notes-textarea" id={`spec-${f.key}`} value={draft[f.key]} onChange={e=>onChange({...draft,[f.key]:e.target.value})} maxLength={1500} rows={f.rows} placeholder={f.placeholder}/></div>)}
-  <div className="notes-save"><span>{dirty?"· Unsaved changes":"· Saved"}</span><button className="button primary" onClick={onSave} disabled={saving||!dirty}>{saving?"Saving…":"Save speculative draft"}</button></div>
+function ThesisBox({ticker,thesis,onChange,onSave,saving,dirty}:{ticker:string;thesis:string;onChange:(t:string)=>void;onSave:()=>void;saving:boolean;dirty:boolean}){
+ return <section className="thesis-section"><div className="section-title"><h3>Thesis</h3><span className="pill amber">Speculative · your working idea</span></div>
+  <p className="muted">Your thesis for {ticker}, discussed with Muse in chat and added here. This is speculation, not sourced data and not the automatic thesis above — the automatic draft, bull/bear case and CANSLIM are untouched.</p>
+  <label className="field-label" htmlFor="thesis-box">Thesis</label><textarea className="input notes-textarea" id="thesis-box" value={thesis} onChange={e=>onChange(e.target.value)} maxLength={6000} rows={8} placeholder="Your thesis for this stock — discussed with Muse and added here."/>
+  <div className="notes-save"><span>{dirty?"· Unsaved changes":"· Saved"}</span><button className="button primary" onClick={onSave} disabled={saving||!dirty}>{saving?"Saving…":"Save thesis"}</button></div>
  </section>;
 }
-export default function ResearchPanel({stock,onNotes,refresh,refreshing,speculative,onSpeculativeChange,onSaveSpeculative,speculativeSaving,speculativeDirty}:{stock:Stock;onNotes:()=>void;refresh:()=>void;refreshing:boolean;speculative:SpeculativeDraft;onSpeculativeChange:(d:SpeculativeDraft)=>void;onSaveSpeculative:()=>void;speculativeSaving:boolean;speculativeDirty:boolean}){
+export default function ResearchPanel({stock,onNotes,refresh,refreshing,thesis,onThesisChange,onSaveThesis,thesisSaving,thesisDirty}:{stock:Stock;onNotes:()=>void;refresh:()=>void;refreshing:boolean;thesis:string;onThesisChange:(t:string)=>void;onSaveThesis:()=>void;thesisSaving:boolean;thesisDirty:boolean}){
  const r=researchOf(stock),s=effective(stock),c=r.canslim,t=r.technicals;
  return <div className="research-panel">
   <div className="draft-topline"><span><BookOpen size={14}/>AUTOMATIC RESEARCH DRAFT</span><small>Updated {date(r.generatedAt)} UK</small></div>
@@ -46,7 +37,7 @@ export default function ResearchPanel({stock,onNotes,refresh,refreshing,speculat
   <h3 className="thesis-title">{r.title}</h3>
   <p className="thesis-summary">{r.summary}</p>
   <div className="style-fit"><span>YOUR INVESTMENT LENS</span><p>{r.styleFit}</p></div>
-  <SpeculativeThesis ticker={stock.ticker} draft={speculative} onChange={onSpeculativeChange} onSave={onSaveSpeculative} saving={speculativeSaving} dirty={speculativeDirty}/>
+  <ThesisBox ticker={stock.ticker} thesis={thesis} onChange={onThesisChange} onSave={onSaveThesis} saving={thesisSaving} dirty={thesisDirty}/>
   <section className="thesis-section"><div className="section-title"><h3><TrendingUp size={16}/>Current price & trend</h3><span className={`trend-tag ${t.trend==='Uptrend'?'up':t.trend==='Downtrend'?'down':''}`}>{t.trend}</span></div><p className="thesis-asof"><Clock3 size={11}/>Quote as of {date(r.quoteAt)} UK</p>
     <div className="technical-grid"><div><span>20-day average</span><strong>{n(t.sma20)}</strong></div><div><span>50-day average</span><strong>{n(t.sma50)}</strong></div><div><span>200-day average</span><strong>{n(t.sma200)}</strong></div><div><span>1-month return</span><strong>{p(t.return1m)}</strong></div><div><span>3-month return</span><strong>{p(t.return3m)}</strong></div><div><span>Daily RSI (14)</span><strong>{t.rsi14?.toFixed(1)||'—'}</strong></div></div>
     {r.priceCommentary.map((paragraph,i)=><p className="thesis-prose" key={i}>{paragraph}</p>)}
