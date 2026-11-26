@@ -56,11 +56,11 @@ export function parseHeadlines(html:string):Partial<Snapshot>{
   const headlines:NonNullable<Snapshot['headlines']>=[];
   for(const m of html.matchAll(/<h3\b[^>]*>\s*<a\b[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a>\s*<\/h3>([\s\S]*?)(?=<h3\b|$)/gi)){
     const rawTitle=textOnly(m[2]);
-    const words=rawTitle.split(' '),title=words.slice(0,12).join(' ')+(words.length>12?'…':'');
+    const words=rawTitle.split(' '),title=words.slice(0,20).join(' ')+(words.length>20?'…':'');
     let url:string;try{url=new URL(m[1],'https://stockanalysis.com').href}catch{continue}
     if(!/^https:\/\//.test(url)||/transcripts/.test(url))continue;
     const date=m[3].match(/title="(\d{4}-\d\d-\d\dT[^"<>]+|[A-Za-z]{3} \d{1,2}, \d{4}[^"<>]*)"/)?.[1];
-    headlines.push({title,url,date});if(headlines.length===2)break;
+    headlines.push({title,url,date});if(headlines.length===5)break;
   }
   return {headlines};
 }
