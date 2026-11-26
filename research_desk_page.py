@@ -302,6 +302,90 @@ def _current_theme() -> str:
     return "Dark" if theme == "Dark" else "Light"
 
 
+def _normalize_theme(raw: object) -> str | None:
+    """Pure helper: "dark"/"Dark" -> "Dark", "light" -> "Light", else None."""
+    if isinstance(raw, list):
+        raw = raw[0] if raw else None
+    if not isinstance(raw, str):
+        return None
+    lowered = raw.strip().lower()
+    if lowered == "dark":
+        return "Dark"
+    if lowered == "light":
+        return "Light"
+    return None
+
+
+def _theme_query_value(theme: str | None) -> str:
+    """Query-param spelling of a theme: "dark" for Dark, "light" otherwise."""
+    return "dark" if theme == "Dark" else "light"
+
+
+def _theme_from_query_params() -> str | None:
+    """Theme carried in the URL (?theme=dark|light), if it is a valid one."""
+    try:
+        return _normalize_theme(st.query_params.get("theme"))
+    except Exception:
+        return None
+
+
+def _set_theme_query_param(theme: str | None) -> None:
+    """Write the chosen theme into the URL, so a full reload carries it."""
+    try:
+        value = _theme_query_value(theme)
+        if _normalize_theme(st.query_params.get("theme")) != ("Dark" if value == "dark" else "Light"):
+            st.query_params["theme"] = value
+    except Exception:
+        pass
+
+
+def _sync_theme() -> str:
+    """Adopt the theme from the URL if one is there, else keep the session
+    choice, and write the result back into the URL.
+
+    Bug fixed here (reported 2026-11-26): the theme used to live only in
+    session state, so it reset to Light on every page change. Clicking a
+    stock or an index card follows a plain <a href="?stock=..."> /
+    "?index=..." anchor — a full browser reload that starts a new
+    Streamlit session, and session state does not survive that. This is
+    the Streamlit equivalent of the preview fix, where the theme travels
+    in the page address: the choice is now also carried in a
+    theme=dark|light query param, which survives a full reload, and every
+    navigation link in this desk carries it (see _link_with_theme). The
+    radio toggle still wins on its own rerun: _sync_theme() may adopt the
+    old URL value first, but st.radio() then returns the widget's new
+    value, which is written back into the URL below.
+    """
+    from_url = _theme_from_query_params()
+    if from_url is not None:
+        st.session_state.macro_theme = from_url
+    theme = _current_theme()
+    _set_theme_query_param(theme)
+    return theme
+
+
+def _link_with_theme(query: str) -> str:
+    """A same-app link (?index=... / ?stock=...) that keeps the theme in
+    the URL, so following it does not reset the desk to Light."""
+    return f"?{query}&theme={_theme_query_value(_current_theme())}"
+
+
+def _clear_macro_route() -> None:
+    """Go back to the Macro Desk home, keeping the theme in the URL.
+
+    Unlike st.query_params.clear(), which would wipe theme=... as well
+    and reset the desk to Light on the next full reload, this removes
+    only the route (index / stock) and keeps the theme param.
+    """
+    try:
+        for key in ("index", "stock"):
+            if key in st.query_params:
+                del st.query_params[key]
+    except Exception:
+        pass
+    _set_theme_query_param(_current_theme())
+
+
 def _macro_css(theme: str | None = None) -> str:
     """Base CSS plus the explicit palette for the chosen theme, theme last
     so it always wins over the base rules and over Streamlit's system theme."""
@@ -719,7 +803,7 @@ def _strip_card(item: dict, data: dict, active: bool) -> str:
         else:
             gauges = '<div class="md-gauge-label">Breadth unavailable — not enough constituent quotes published.</div>'
     active_class = " md-active" if active else ""
-    href = f"?index={item['id']}"
+    href = _link_with_theme(f"index={item['id']}")
     return (
         f'<div class="md-card{active_class}">'
         f'<div><a href="{href}" target="_self" style="text-decoration:none;color:inherit">'
@@ -734,7 +818,7 @@ def render_strip(active_id: str | None = None) -> dict:
 
     Returns {index_id: data} so the index page can reuse the same load.
     """
-    st.markdown('<h1 class="md-title"><a href="?index=" target="_self" style="text-decoration:none;color:inherit">Macro Desk</a></h1>', unsafe_allow_html=True)
+    st.markdown(f'<h1 class="md-title"><a href="?theme={_theme_query_value(_current_theme())}" target="_self" style="text-decoration:none;color:inherit">Macro Desk</a></h1>', unsafe_allow_html=True)
     st.caption("Live data from Yahoo Finance, Forex Factory and Google News. A figure stays blank when its source does not publish it.")
     data: dict[str, dict] = {}
     with st.spinner("Loading indices…"):
@@ -760,7 +844,7 @@ def render_index_page(index_id: str, data: dict, calendar: dict | None) -> None:
     item = INDEX_BY_ID[index_id]
     info = data.get(index_id) or {}
     if st.button("← Back to Macro Desk", key="macro_index_back"):
-        st.query_params.clear()
+        _clear_macro_route()
         st.rerun()
     if not info.get("available"):
         st.warning(f"{item['label']} trend and price could not be loaded from Yahoo Finance.")
@@ -1012,8 +1096,9 @@ def _render_watchlist() -> None:
             return "—"
         forward_pe = f"{row['forward_pe']:.1f}x" if isinstance(row.get("forward_pe"), (int, float)) else "n/m"
         parent = f" · {row['parent']}" if row.get("parent") else ""
+        stock_href = _link_with_theme("stock=" + urllib.parse.quote(ticker))
         body_rows.append(
-            f"<tr><td><a href='?stock={urllib.parse.quote(ticker)}' target='_self'><strong>{html.escape(ticker)}</strong></a><br>"
+            f"<tr><td><a href='{stock_href}' target='_self'><strong>{html.escape(ticker)}</strong></a><br>"
             f"{html.escape(str(row.get('name') or ''))}{html.escape(parent)}</td>"
             f"<td class='md-mono'>{price}</td><td class='md-mono'>{target_cell}</td>"
             f"<td>{above_below(row.get('above50'))}</td><td>{above_below(row.get('above200'))}</td>"
@@ -1032,7 +1117,7 @@ def _render_watchlist() -> None:
 def _render_stock_placeholder(ticker: str) -> None:
     """Stock detail placeholder (spec 3.4) — design to be supplied later."""
     if st.button("← Back to the watchlist", key="macro_stock_back"):
-        st.query_params.clear()
+        _clear_macro_route()
         st.rerun()
     added = st.session_state.get("macro_added") or {}
     snapshot = added.get(ticker.upper())
@@ -1075,10 +1160,15 @@ def render_macro_desk() -> None:
     """Macro Desk home, index and stock pages. The top strip and the
     red-folder calendar are visible on every page (spec section 3)."""
     _hydrate_watchlist()
-    if "macro_theme" not in st.session_state:
-        st.session_state.macro_theme = "Light"
-    theme = st.radio("Theme", options=["Light", "Dark"], index=0 if st.session_state.macro_theme == "Light" else 1, horizontal=True, key="macro_theme_radio")
+    # Theme persistence: _sync_theme() adopts theme=dark|light from the
+    # URL when present (see _sync_theme for why session state alone is
+    # not enough — navigation links are full reloads). The radio toggle
+    # below then returns the widget's value, which wins and is written
+    # back into the URL so the next page change carries it.
+    _sync_theme()
+    theme = st.radio("Theme", options=["Light", "Dark"], index=0 if _current_theme() == "Light" else 1, horizontal=True, key="macro_theme_radio")
     st.session_state.macro_theme = theme
+    _set_theme_query_param(theme)
     # Both themes inject a full explicit palette (see MACRO_THEME_CSS):
     # Light used to inject nothing, so on a dark-system device Streamlit's
     # dark chrome showed through and Light mode looked dark. The chosen
