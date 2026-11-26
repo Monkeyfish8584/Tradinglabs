@@ -8,7 +8,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 
 from research_desk_page import (
     CLOSE_WINDOWS,
@@ -16,8 +16,15 @@ from research_desk_page import (
     BREADTH_SOURCES,
     MACRO_MARKETS,
     THESES,
+    _at_high,
+    _at_low,
+    _is_fresh,
+    _return_over_days,
+    _snapshot_fetched_at,
+    aggregate_4h,
     average_position,
     close_window,
+    compute_macro_spider,
     daily_trend,
     breadth_summary,
     breadth_text,
@@ -25,10 +32,12 @@ from research_desk_page import (
     load_breadth,
     load_macro_rows,
     load_quote_cache,
+    macro_trend_for,
     macro_trends_html,
     load_snapshots,
     rsi_14,
     save_quote_cache,
+    sma,
     squeeze_checks,
     thesis_for,
     trend_text,
@@ -40,12 +49,18 @@ from research_desk_page import (
 )
 from research_desk_quotes import (
     QuoteError,
+    fetch_candles,
     fetch_new_snapshot,
+    fetch_news_rss,
     normalize_ticker,
     number_value,
     parse_forecast_html,
+    parse_headlines,
+    parse_insider,
     parse_statistics_html,
+    parse_yahoo_chart,
     refresh_quote,
+    search_symbols,
     yahoo_chart_url,
 )
 
@@ -178,8 +193,8 @@ def test_daily_and_weekly_trends_use_stored_series() -> None:
     shorter, shorter_dates = close_window(windowed, 60)
     assert shorter_dates[0] == "2026-10-01"
     assert daily_trend(windowed) == daily_trend({"closes": windowed["closes"], "closeDates": windowed["closeDates"]})
-    assert DEFAULT_CLOSE_WINDOW == 60
-    assert set(CLOSE_WINDOWS) == {30, 60, 90}
+    assert DEFAULT_CLOSE_WINDOW == 365
+    assert set(CLOSE_WINDOWS) == {90, 365, 1825}
     rows = {row["ticker"]: row for row in watchlist_rows()}
     assert rows["USAR"]["daily_trend"] == daily_trend(usar)
     assert rows["USAR"]["weekly_trend"] == weekly_trend(usar)
@@ -241,7 +256,7 @@ def test_added_snapshot_uses_only_returned_fields() -> None:
     </table>
     """
     pages = {
-        "https://query1.finance.yahoo.com/v8/finance/chart/EX?interval=1d&range=2y": __import__("json").dumps(yahoo),
+        "https://query1.finance.yahoo.com/v8/finance/chart/EX?interval=1d&range=5y": __import__("json").dumps(yahoo),
         "https://stockanalysis.com/stocks/ex/statistics/": stats,
         "https://stockanalysis.com/stocks/ex/forecast/": forecast,
     }
@@ -346,17 +361,32 @@ def test_refresh_quote_updates_price_and_keeps_fundamentals() -> None:
 
 
 def test_macro_trends_follow_the_desk_rules() -> None:
-    dates = ["2026-10-19", "2026-10-20", "2026-10-21", "2026-10-22", "2026-10-23", "2026-10-26", "2026-10-27", "2026-10-28", "2026-10-29", "2026-10-30"]
-    closes = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+    dates = [f"2026-10-{day:02d}" for day in range(1, 31)]
+    closes = list(range(1, 31))
     stamps = [int(__import__("datetime").datetime.fromisoformat(day).replace(tzinfo=__import__("datetime").timezone.utc).timestamp()) for day in dates]
     body = __import__("json").dumps(
         {
             "chart": {
                 "result": [
                     {
-                        "meta": {"regularMarketPrice": 10, "shortName": "Macro"},
+                        "meta": {"regularMarketPrice": 30, "shortName": "Macro"},
                         "timestamp": stamps,
-                        "indicators": {"quote": [{"close": closes}]},
+                        "indicators": {"quote": [{"close": closes, "high": closes, "low": closes}]},
+                    }
+                ]
+            }
+        }
+    )
+    hour_stamps = [int(__import__("datetime").datetime(2026, 11, 20, tzinfo=__import__("datetime").timezone.utc).timestamp()) + hour * 3600 for hour in range(100)]
+    hour_closes = [float(100 + hour) for hour in range(100)]
+    hourly_body = __import__("json").dumps(
+        {
+            "chart": {
+                "result": [
+                    {
+                        "meta": {"regularMarketPrice": 199, "shortName": "Macro hourly"},
+                        "timestamp": hour_stamps,
+                        "indicators": {"quote": [{"close": hour_closes, "high": hour_closes, "low": hour_closes}]},
                     }
                 ]
             }
@@ -366,14 +396,23 @@ def test_macro_trends_follow_the_desk_rules() -> None:
     failed = yahoo_chart_url("^GDAXI", "6mo")
 
     def getter(url: str) -> str:
+        if "GDAXI" in url:
+            raise RuntimeError("Ticker not found or quote unavailable")
         if url == failed:
             raise RuntimeError("Ticker not found or quote unavailable")
-        if url not in expected:
-            raise RuntimeError(f"unexpected {url}")
-        return expected[url]
+        if url in expected:
+            return expected[url]
+        if "news.google.com/rss" in url:
+            return '<?xml version="1.0"?><rss version="2.0"><channel></channel></rss>'
+        if "query1.finance.yahoo.com" in url:
+            if "interval=1h" in url or "interval=60m" in url:
+                return hourly_body
+            return body
+        raise RuntimeError(f"unexpected {url}")
 
     rows = load_macro_rows(getter)
-    assert [row["label"] for row in rows] == ["BTCUSD", "US500", "US100", "US30", "ETHUSD", "UK100", "GER30"]
+    assert [row["label"] for row in rows] == ["BTCUSD", "US500", "US100", "US30", "ETHUSD", "UK100", "GER30", "EURUSD", "GBPJPY", "USDJPY"]
+    assert [symbol for _, symbol in MACRO_MARKETS[-3:]] == ["EURUSD=X", "GBPJPY=X", "USDJPY=X"]
     assert normalize_ticker("^GSPC") == "^GSPC"
     for row in rows:
         if row["label"] == "GER30":
@@ -385,7 +424,9 @@ def test_macro_trends_follow_the_desk_rules() -> None:
             assert row["weekly"] == "Up"
     html = macro_trends_html(rows)
     assert "BTCUSD" in html and "GER30" in html
+    assert "EURUSD" in html and "GBPJPY" in html and "USDJPY" in html
     assert ">Daily <" in html and ">Weekly <" in html
+    assert "4-hour" in html
     assert "Unavailable" in html
     assert "RSI" not in html and "200-day" not in html and "$" not in html
     assert 'href="?breadth=US500"' in html
@@ -476,6 +517,295 @@ def test_breadth_uses_published_highs_and_lows_only() -> None:
     assert neither["ready"] is False
     assert "percentage" in breadth_text({**neither, "applies": True})
 
+    # The desk rule is "near": within 1% of the 52-week extreme.
+    assert _at_high(9.95, 10) is True
+    assert _at_high(9.9, 10) is True
+    assert _at_high(9.5, 10) is False
+    assert _at_low(5.05, 5) is True
+    assert _at_low(5.5, 5) is False
+    near_high = breadth_summary("US30", ["NEAR"], [{"day_high": 9.95, "day_low": 9, "high_52": 10, "low_52": 5}])
+    assert near_high["highs"] == 1 and near_high["lows"] == 0
+    not_high = breadth_summary("US30", ["NEAR"], [{"day_high": 9.5, "day_low": 9, "high_52": 10, "low_52": 5}])
+    assert not_high["highs"] == 0
+    near_low = breadth_summary("US30", ["NEAR"], [{"day_high": 8, "day_low": 5.05, "high_52": 12, "low_52": 5}])
+    assert near_low["lows"] == 1 and near_low["highs"] == 0
+
+
+def test_parse_headlines_caps_at_five_and_truncates_titles() -> None:
+    words = [f"Word{number}" for number in range(1, 26)]
+    long_title = " ".join(words)
+    items = []
+    for index in range(7):
+        title = long_title if index == 0 else f"Apple reports record quarter {index}"
+        items.append(
+            f'<h3><a href="/stocks/aapl/news/story-{index}">{title}</a></h3>'
+            f'<div><span title="2026-11-{20 - index:02d}T09:30:00Z">Nov {20 - index}, 2026</span></div>'
+        )
+    parsed = parse_headlines("\n".join(items))
+    headlines = parsed["headlines"]
+    assert len(headlines) == 5
+    first = headlines[0]
+    assert first["title"].startswith(" ".join(words[:20]))
+    assert len(first["title"].split()) == 20
+    assert "Word21" not in first["title"]
+    assert first["url"] == "https://stockanalysis.com/stocks/aapl/news/story-0"
+    assert "2026-11-20" in str(first["date"])
+    assert headlines[1]["title"] == "Apple reports record quarter 1"
+    assert headlines[1]["url"] == "https://stockanalysis.com/stocks/aapl/news/story-1"
+    assert "2026" in str(headlines[1]["date"])
+    assert [item["url"] for item in headlines] == [f"https://stockanalysis.com/stocks/aapl/news/story-{index}" for index in range(5)]
+
+
+def test_parse_insider_parses_table_and_raises_on_no_trades() -> None:
+    table = """
+    <table>
+      <tr><td>Date</td><td>Insider</td><td>Transaction</td><td>Shares</td><td>Price</td><td>Value</td></tr>
+      <tr><td>2026-11-18</td><td>Jane Smith</td><td>Buy</td><td>1,000</td><td>$150.25</td><td>$150,250</td></tr>
+      <tr><td>2026-11-10</td><td>John Doe</td><td>Sale</td><td>500</td><td>$148.00</td><td>$74,000</td></tr>
+    </table>
+    """
+    parsed = parse_insider(table)
+    trades = parsed["insiderTrades"]
+    assert len(trades) == 2
+    assert trades[0] == {"date": "2026-11-18", "insider": "Jane Smith", "type": "buy", "shares": 1000, "price": 150.25, "value": 150250}
+    assert trades[1] == {"date": "2026-11-10", "insider": "John Doe", "type": "sell", "shares": 500, "price": 148.0, "value": 74000}
+    rows = "".join(
+        f"<tr><td>2026-11-{day:02d}</td><td>Insider {day}</td><td>Buy</td><td>100</td><td>$10.00</td><td>$1,000</td></tr>"
+        for day in range(1, 13)
+    )
+    assert len(parse_insider(f"<table>{rows}</table>")["insiderTrades"]) == 10
+    try:
+        parse_insider("<table><tr><td>Date</td><td>Insider</td></tr></table>")
+    except (RuntimeError, ValueError):
+        pass
+    else:
+        raise AssertionError("insider parser accepted a page with no trades")
+
+
+def test_search_symbols_returns_yahoo_matches() -> None:
+    payload = {
+        "quotes": [
+            {"symbol": "AAPL", "shortname": "Apple Inc.", "longname": "Apple Inc.", "exchange": "NMS", "exchDisp": "NASDAQ", "quoteType": "EQUITY"},
+            {"symbol": "MSFT", "shortname": "Microsoft Corporation", "longname": "Microsoft Corporation", "exchange": "NMS", "exchDisp": "NASDAQ", "quoteType": "EQUITY"},
+        ]
+    }
+    seen: list[str] = []
+
+    def getter(url: str) -> str:
+        seen.append(url)
+        return __import__("json").dumps(payload)
+
+    results = search_symbols("AAPL", getter)
+    assert "v1/finance/search" in seen[0]
+    assert "q=AAPL" in seen[0]
+    assert [row["symbol"] for row in results] == ["AAPL", "MSFT"]
+    assert [row["name"] for row in results] == ["Apple Inc.", "Microsoft Corporation"]
+    assert [row["exchange"] for row in results] == ["NMS", "NMS"]
+
+
+def _chart_body(stamps: list[int], closes: list[float], highs: list[float] | None = None, lows: list[float] | None = None) -> str:
+    return __import__("json").dumps(
+        {
+            "chart": {
+                "result": [
+                    {
+                        "meta": {"regularMarketPrice": closes[-1], "shortName": "Example"},
+                        "timestamp": stamps,
+                        "indicators": {"quote": [{"close": closes, "high": highs if highs is not None else closes, "low": lows if lows is not None else closes}]},
+                    }
+                ]
+            }
+        }
+    )
+
+
+def test_fetch_candles_returns_daily_points() -> None:
+    stamps = [int(datetime(2026, 11, day, tzinfo=timezone.utc).timestamp()) for day in (18, 19, 20)]
+    seen: list[str] = []
+
+    def getter(url: str) -> str:
+        seen.append(url)
+        return _chart_body(stamps, [10, 11, 12], [10.5, 11.5, 12.5], [9.5, 10.5, 11.5])
+
+    candles = fetch_candles("AAPL", getter=getter)
+    assert "range=5y" in seen[0] and "interval=1d" in seen[0]
+    assert len(candles) == 3
+    assert [candle["date"] for candle in candles] == ["2026-11-18", "2026-11-19", "2026-11-20"]
+    assert [candle["close"] for candle in candles] == [10, 11, 12]
+    assert [candle["high"] for candle in candles] == [10.5, 11.5, 12.5]
+    assert [candle["low"] for candle in candles] == [9.5, 10.5, 11.5]
+    fetch_candles("AAPL", interval="1h", span="5d", getter=getter)
+    assert "interval=1h" in seen[-1] and "range=5d" in seen[-1]
+
+
+def test_fetch_news_rss_caps_at_five_and_returns_empty_on_failure() -> None:
+    items = "".join(
+        f"<item><title><![CDATA[Market news {number}]]></title><link>https://example.com/news/{number}</link>"
+        f"<pubDate>Mon, 23 Nov 2026 10:00:00 GMT</pubDate></item>"
+        for number in range(1, 7)
+    )
+    rss = f'<?xml version="1.0"?><rss version="2.0"><channel>{items}</channel></rss>'
+    seen: list[str] = []
+
+    def getter(url: str) -> str:
+        seen.append(url)
+        return rss
+
+    news = fetch_news_rss("US500", getter)
+    assert "news.google.com/rss/search" in seen[0]
+    assert "q=US500" in seen[0]
+    assert len(news) == 5
+    assert [item["title"] for item in news] == [f"Market news {number}" for number in range(1, 6)]
+    assert news[0]["url"] == "https://example.com/news/1"
+    assert "2026" in str(news[0]["date"])
+
+    def fail(url: str) -> str:
+        raise RuntimeError("Feed could not be reached; try again later")
+
+    assert fetch_news_rss("US500", fail) == []
+
+
+def test_parse_yahoo_chart_keeps_about_1300_closes() -> None:
+    stamps = [int(datetime(2021, 1, 1, tzinfo=timezone.utc).timestamp()) + index * 86400 for index in range(1400)]
+    parsed = parse_yahoo_chart(_chart_body(stamps, [float(index + 1) for index in range(1400)]), "AAPL")
+    assert len(parsed["closes"]) == 1300
+    assert len(parsed["closeDates"]) == 1300
+    assert parsed["closes"][0] == 101
+    assert parsed["closes"][-1] == 1400
+    short = parse_yahoo_chart(_chart_body(stamps[:6], [10, 11, 12, 13, 14, 16]), "AAPL")
+    assert len(short["closes"]) == 6
+
+
+def test_sma_returns_last_period_average() -> None:
+    assert sma([1, 2, 3, 4, 5], 3) == 4.0
+    assert sma([10, 20, 30], 2) == 25.0
+    assert sma([1, 2], 5) is None
+
+
+def _trend_candles(closes: list[float]) -> list[dict]:
+    return [
+        {"date": f"2026-11-{index + 1:02d}", "close": close, "high": close + 1, "low": close - 1}
+        for index, close in enumerate(closes)
+    ]
+
+
+def test_aggregate_4h_groups_four_hourly_candles() -> None:
+    hourly = [
+        {"date": f"2026-11-26T{9 + hour:02d}:00:00", "close": float(10 + hour), "high": float(11 + hour), "low": float(9 + hour)}
+        for hour in range(8)
+    ]
+    grouped = aggregate_4h(hourly)
+    assert len(grouped) == 2
+    assert grouped[0]["date"] == "2026-11-26T12:00:00"
+    assert grouped[0]["close"] == 13 and grouped[0]["high"] == 14 and grouped[0]["low"] == 9
+    assert grouped[1]["date"] == "2026-11-26T16:00:00"
+    assert grouped[1]["close"] == 17 and grouped[1]["high"] == 18 and grouped[1]["low"] == 13
+    assert len(aggregate_4h(hourly[:5])) == 1
+
+
+def test_macro_trend_for_labels() -> None:
+    bullish = macro_trend_for(_trend_candles([float(100 + index) for index in range(25)]))
+    assert bullish["label"] == "Bullish"
+    assert bullish["aboveSma20"] is True
+    assert abs(bullish["changePct"] - (124 / 123 - 1) * 100) < 1e-9
+    bearish = macro_trend_for(_trend_candles([float(124 - index) for index in range(25)]))
+    assert bearish["label"] == "Bearish"
+    assert bearish["aboveSma20"] is False
+    assert abs(bearish["changePct"] - (100 / 101 - 1) * 100) < 1e-9
+    up_below_average = macro_trend_for(_trend_candles([130.0] * 20 + [120, 115, 110, 108, 112]))
+    assert up_below_average["label"] == "Mixed"
+    assert up_below_average["aboveSma20"] is False
+    down_above_average = macro_trend_for(_trend_candles([100.0] * 20 + [120, 125, 130, 135, 132]))
+    assert down_above_average["label"] == "Mixed"
+    assert down_above_average["aboveSma20"] is True
+    short = macro_trend_for(_trend_candles([10, 11, 12, 13, 14]))
+    assert short["label"] == "Unavailable"
+    assert isinstance(short["note"], str)
+
+
+def test_compute_macro_spider_crowded_not_broken() -> None:
+    # Technical 7: daily share 2/4 x4 (=2) + weekly 4/4 x3 (=3) + 4-hour 0/4 x1 (=0)
+    # + breadth net (27-5)/100 = 0.22 mapped to the full 2 points. Sentiment 8:
+    # crowded share 27/100 mapped to 4.5 + daily 2/4 x3 (=1.5) + weekly 4/4 x2 (=2).
+    # Fundamental 6: 6 of 10 desk snapshots are cheap (forward P/E < 20) and
+    # profitable (EPS > 0); the other 4 are neither.
+    def instrument(label: str, daily: str, weekly: str, four_hour: str) -> dict:
+        return {"label": label, "daily": {"label": daily}, "weekly": {"label": weekly}, "four_hour": {"label": four_hour}}
+
+    instruments = [
+        instrument("US500", "Bullish", "Bullish", "Bearish"),
+        instrument("US100", "Bullish", "Bullish", "Bearish"),
+        instrument("UK100", "Bearish", "Bullish", "Bearish"),
+        instrument("GER30", "Bearish", "Bullish", "Bearish"),
+    ]
+    breadth = [
+        {"highs": 27, "lows": 5, "total": 100},
+        {"highs": 27, "lows": 5, "total": 100},
+    ]
+    snapshots = [{"forwardPE": 15, "eps": 2.0}] * 6 + [{"forwardPE": 40, "eps": -1.0}] * 4
+    spider = compute_macro_spider(instruments, breadth, snapshots)
+    scores = {axis["axis"]: axis["score"] for axis in spider["axes"]}
+    assert [axis["axis"] for axis in spider["axes"]] == ["Technical", "Sentiment", "Fundamental"]
+    assert scores == {"Technical": 7, "Sentiment": 8, "Fundamental": 6}
+    for axis in spider["axes"]:
+        assert axis["score"] is None or 0 <= axis["score"] <= 10
+        assert isinstance(axis["note"], str)
+    assert spider["verdict"] == "Crowded, not broken"
+    assert isinstance(spider["verdict_note"], str) and spider["verdict_note"]
+
+
+def test_compute_macro_spider_has_no_scores_without_inputs() -> None:
+    spider = compute_macro_spider([], [], [])
+    assert {axis["axis"]: axis["score"] for axis in spider["axes"]} == {"Technical": None, "Sentiment": None, "Fundamental": None}
+    assert isinstance(spider["verdict"], str) and spider["verdict"]
+    assert isinstance(spider["verdict_note"], str)
+
+
+def test_return_over_days_is_date_anchored() -> None:
+    snapshot = {"closes": [float(day) for day in range(1, 31)], "closeDates": [f"2026-10-{day:02d}" for day in range(1, 31)]}
+    assert abs(_return_over_days(snapshot, 7) - (30 / 23 - 1) * 100) < 1e-9
+    assert abs(_return_over_days(snapshot, 29) - (30 / 1 - 1) * 100) < 1e-9
+    short = {"closes": [10, 12], "closeDates": ["2026-10-29", "2026-10-30"]}
+    assert _return_over_days(short, 90) is None
+
+
+def test_snapshot_fetched_at_and_is_fresh() -> None:
+    now = datetime.now(timezone.utc)
+
+    def stamp(moment: datetime) -> str:
+        return moment.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    recent = {"quoteFetchedAt": stamp(now - timedelta(minutes=1)), "attemptedAt": stamp(now - timedelta(minutes=30))}
+    assert _snapshot_fetched_at(recent) == (now - timedelta(minutes=1)).replace(microsecond=0)
+    attempted_only = {"attemptedAt": stamp(now - timedelta(minutes=2))}
+    assert _snapshot_fetched_at(attempted_only) == (now - timedelta(minutes=2)).replace(microsecond=0)
+    assert _snapshot_fetched_at({}) is None
+    assert _is_fresh(recent) is True
+    assert _is_fresh(attempted_only) is True
+    old = {"quoteFetchedAt": stamp(now - timedelta(minutes=10))}
+    assert _is_fresh(old) is False
+    assert _is_fresh(old, minutes=15) is True
+
+
+def test_quote_cache_round_trips_theses() -> None:
+    cache = ROOT / "tests" / "_quote_cache_theses.json"
+    payload = {
+        "refreshed": {"USAR": {"ticker": "USAR", "price": 21.5}},
+        "added": {},
+        "refresh_at": "2026-11-10T09:40:00Z",
+        "errors": [],
+        "theses": {"USAR": "Rare-earth supply-chain upside, with funding discipline", "NVO": "A profitable medical franchise after an expectations reset"},
+    }
+    save_quote_cache(payload, cache)
+    loaded = load_quote_cache(cache)
+    assert loaded["theses"] == payload["theses"]
+    assert loaded["refreshed"]["USAR"]["price"] == 21.5
+    assert loaded["refresh_at"] == "2026-11-10T09:40:00Z"
+    cache.unlink()
+    save_quote_cache({"refreshed": {}, "added": {}, "refresh_at": None, "errors": []}, cache)
+    assert load_quote_cache(cache)["theses"] == {}
+    cache.unlink()
+
 
 def test_trading_edge_page_remains_the_default() -> None:
     source = (ROOT / "app.py").read_text(encoding="utf-8")
@@ -498,5 +828,19 @@ if __name__ == "__main__":
     test_refresh_quote_updates_price_and_keeps_fundamentals()
     test_macro_trends_follow_the_desk_rules()
     test_breadth_uses_published_highs_and_lows_only()
+    test_parse_headlines_caps_at_five_and_truncates_titles()
+    test_parse_insider_parses_table_and_raises_on_no_trades()
+    test_search_symbols_returns_yahoo_matches()
+    test_fetch_candles_returns_daily_points()
+    test_fetch_news_rss_caps_at_five_and_returns_empty_on_failure()
+    test_parse_yahoo_chart_keeps_about_1300_closes()
+    test_sma_returns_last_period_average()
+    test_aggregate_4h_groups_four_hourly_candles()
+    test_macro_trend_for_labels()
+    test_compute_macro_spider_crowded_not_broken()
+    test_compute_macro_spider_has_no_scores_without_inputs()
+    test_return_over_days_is_date_anchored()
+    test_snapshot_fetched_at_and_is_fresh()
+    test_quote_cache_round_trips_theses()
     test_trading_edge_page_remains_the_default()
     print("Research desk snapshot checks passed.")
