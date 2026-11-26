@@ -148,8 +148,9 @@ def test_macro_desk_replaces_research_desk() -> None:
         assert gone not in page, gone
     assert "Crypto" not in page or "Crypto has no" in page
     # Spec columns and placeholder are present.
-    for wanted in ("Analyst target", "Fwd P/E", "50MA", "200MA", "Weekly", "Daily", "Your watchlist is empty", "To be designed – coming soon"):
+    for wanted in ("Analyst target", "Fwd P/E", "50MA", "200MA", "Weekly", "Daily", "Your watchlist is empty", "Import X sentiment", "Insider transactions", "Seasonality"):
         assert wanted in page, wanted
+    assert "To be designed – coming soon" not in page
 
 
 def test_app_has_macro_desk_and_untouched_data_hub() -> None:
@@ -307,6 +308,123 @@ def test_sma_returns_last_period_average() -> None:
     assert sma([1, 2, 3, 4, 5], 3) == 4.0
 
 
+def test_grok_import_files_blocks_and_skips_unknown_names() -> None:
+    from macro_desk_insights import parse_grok_import
+
+    text = """
+SUBJECT: US100
+TONE: bullish
+SCORE: 140
+SUMMARY: Buyers are defending the open.
+POST: @desk | bullish | Still bid above the 50. | https://x.com/desk/status/1
+POST: @other | bearish | Too extended for me.
+---
+SUBJECT: Not A Real Name
+TONE: bearish
+SCORE: -20
+SUMMARY: Ignored.
+POST: @x | bearish | Skip.
+"""
+    parsed = parse_grok_import(text, {"nvda": "NVDA"})
+    assert parsed["unknown"] == ["Not A Real Name"]
+    assert len(parsed["items"]) == 1
+    item = parsed["items"][0]
+    assert item["subject"] == "ndx"
+    assert item["score"] == 100
+    assert item["tone"] == "bullish"
+    assert item["posts"][0]["link"] == "https://x.com/desk/status/1"
+    assert item["posts"][1]["link"] == ""
+    named = parse_grok_import("SUBJECT: NVIDIA\nTONE: neutral\nSCORE: 4\nSUMMARY: Quiet.\nPOST: @a | neutral | Waiting.\n", {"nvidia": "NVDA"})
+    assert named["items"][0]["subject"] == "NVDA"
+
+
+def test_sentiment_score_uses_the_published_weights_and_a_minimum() -> None:
+    from macro_desk_insights import score_day, sentiment_view
+
+    both = score_day(50, 3, -10, 3)
+    assert both["score"] == 0.6 * 50 + 0.4 * -10
+    assert both["low_volume"] is False
+    social_only = score_day(None, 0, 20, 3)
+    assert social_only["score"] == 20 and social_only["low_volume"] is True
+    assert score_day(None, 0, 20, 2)["score"] is None
+    history = {}
+    for offset, score in enumerate([10, 10, 10, 0, 0, 0, 0, 30, 30, 30]):
+        day = date(2026, 11, 17) + timedelta(days=offset)
+        history[day.isoformat()] = {"score": score, "posts": [{}, {}, {}], "summary": "saved", "tone": "bullish"}
+    view = sentiment_view(history, date(2026, 11, 26))
+    assert view["score"] == 30
+    assert view["label"] == "Improving"
+    assert view["change"] == 20
+    quiet = sentiment_view(
+        {
+            "2026-11-24": {"score": 10, "posts": [{}, {}, {}]},
+            "2026-11-25": {"score": 10, "posts": [{}, {}, {}]},
+            "2026-11-26": {"score": 12, "posts": [{}, {}, {}]},
+            "2026-11-17": {"score": 10, "posts": [{}, {}, {}]},
+            "2026-11-18": {"score": 10, "posts": [{}, {}, {}]},
+            "2026-11-19": {"score": 10, "posts": [{}, {}, {}]},
+        },
+        date(2026, 11, 26),
+    )
+    assert quiet["label"] is None
+
+
+def test_seasonality_uses_published_closes_only() -> None:
+    from macro_desk_insights import seasonality_from_candles
+
+    candles = []
+    for year, start in ((2024, 100.0), (2025, 80.0), (2026, 50.0)):
+        for month, close in ((1, start), (6, start * 1.1), (11, start * 1.2)):
+            candles.append({"date": f"{year}-{month:02d}-15", "close": close})
+    candles.append({"date": "2026-12-15", "close": 90.0})
+    report = seasonality_from_candles(candles, date(2026, 11, 26))
+    assert round(report["summary"]["2026"], 4) == 20
+    assert report["as_of"] == "2026-11-15"
+    assert report["monthly"]["2026"][11] is None
+    assert report["monthly"]["2026"][10] is not None
+    assert report["monthly"]["2024"][10] is not None
+    assert all(value is None or isinstance(value, float) for value in report["average"])
+
+
+def test_form4_keeps_open_market_buys_separate_from_awards() -> None:
+    from macro_desk_insights import form4_xml_name, insider_summary, parse_form4
+
+    assert form4_xml_name(["xslF345X06/form4.xml", "form4.xml"], "xslF345X06/form4.xml") == "form4.xml"
+
+    xml = """
+    <ownershipDocument>
+      <reportingOwner><reportingOwnerId><rptOwnerName>Ada Lovelace</rptOwnerName></reportingOwnerId>
+      <reportingOwnerRelationship><officerTitle>CFO</officerTitle></reportingOwnerRelationship></reportingOwner>
+      <nonDerivativeTable>
+        <nonDerivativeTransaction>
+          <transactionDate><value>2026-11-20</value></transactionDate>
+          <transactionCoding><transactionCode>P</transactionCode></transactionCoding>
+          <transactionAmounts>
+            <transactionShares><value>100</value></transactionShares>
+            <transactionPricePerShare><value>10</value></transactionPricePerShare>
+          </transactionAmounts>
+        </nonDerivativeTransaction>
+        <nonDerivativeTransaction>
+          <transactionDate><value>2026-11-01</value></transactionDate>
+          <transactionCoding><transactionCode>A</transactionCode></transactionCoding>
+          <transactionAmounts>
+            <transactionShares><value>50</value></transactionShares>
+            <transactionPricePerShare><value>0</value></transactionPricePerShare>
+          </transactionAmounts>
+        </nonDerivativeTransaction>
+      </nonDerivativeTable>
+    </ownershipDocument>
+    """
+    trades = parse_form4(xml, "2026-11-22")
+    assert [trade["type"] for trade in trades] == ["buy", "other"]
+    assert trades[0]["person"] == "Ada Lovelace"
+    assert trades[0]["value"] == 1000
+    summary = insider_summary(trades, date(2026, 11, 26))
+    assert summary["buys"] == 1
+    assert summary["insider_buying"] is True
+    assert summary["net_value"] == 1000
+
+
 if __name__ == "__main__":
     test_macro_indices_are_five_in_spec_order()
     test_ema_trend_bullish_when_above_rising_ema()
@@ -324,4 +442,10 @@ if __name__ == "__main__":
     test_fetch_news_rss_caps_at_five_and_returns_empty_on_failure()
     test_parse_yahoo_chart_keeps_about_1300_closes()
     test_sma_returns_last_period_average()
+    test_macro_theme_has_explicit_light_and_dark_palettes()
+    test_macro_theme_persists_across_pages()
+    test_grok_import_files_blocks_and_skips_unknown_names()
+    test_sentiment_score_uses_the_published_weights_and_a_minimum()
+    test_seasonality_uses_published_closes_only()
+    test_form4_keeps_open_market_buys_separate_from_awards()
     print("Macro Desk checks passed.")

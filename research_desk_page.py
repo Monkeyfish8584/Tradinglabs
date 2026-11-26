@@ -13,17 +13,22 @@ is a macro-first dashboard for equity index traders:
 - One index page per index: hero, 60-session price chart, recent news,
   underlying breadth (top constituents) and red-folder events for it.
 - A watchlist: search by ticker or company name, add, and see price,
-  analyst target + upside/downside, 50MA, 200MA, weekly, daily and
-  forward P/E. Stock detail is a placeholder for now.
+  analyst target + upside/downside, 50MA, 200MA, weekly, daily,
+  forward P/E, and a sentiment score when one has been saved.
+- A stock page: price and trend, imported sentiment, news, US insider
+  filings from SEC Form 4, and a government-trades note.
+- An index seasonality card from published daily closes, plus a
+  sentiment card. X posts come only from a confirmed Grok import.
 
 Live data comes from the same public providers the old desk used:
 Yahoo Finance for prices/closes (``research_desk_quotes``), Forex
 Factory's free weekly calendar JSON for red-folder events, Google News
 RSS for index news, Stock Analysis for analyst targets / forward P/E.
 A figure stays blank when its source does not publish it; nothing is
-invented. There is no Thesis box, no CANSLIM, no spider, no insider
-trades and no short-squeeze checks in this desk — the spec does not
-ask for them.
+invented. There is no Thesis box, no CANSLIM, no spider and no
+short-squeeze checks. US insider rows are SEC Form 4 filings. A
+sentiment number is shown only after a confirmed import. Government
+trades stay blank until a filings feed is connected.
 
 Calculation defaults (spec section 4, unconfirmed by the user, all in
 one config place at the top of this file):
@@ -56,6 +61,13 @@ from zoneinfo import ZoneInfo
 import pandas as pd
 import streamlit as st
 
+from macro_desk_insights import (
+    fetch_bluesky_posts,
+    fetch_us_insider_trades,
+    parse_grok_import,
+    seasonality_from_candles,
+    sentiment_view,
+)
 from research_desk_quotes import (
     QuoteError,
     fetch_candles,
@@ -273,6 +285,7 @@ MACRO_THEME_CSS: dict[str, str] = {
 .md-up { color: #15803d !important; } .md-down { color: #b42318 !important; }
 table.md-watchlist th, table.md-watchlist td { color: #111827 !important; }
 .md-event-chip { color: #111827 !important; }
+.md-hero, .md-hero h2, .md-hero .md-hero-price { color: #ffffff !important; }
 </style>
 """,
     "Dark": """
@@ -288,6 +301,7 @@ table.md-watchlist th, table.md-watchlist td { color: #111827 !important; }
 .md-up { color: #4ade80 !important; } .md-down { color: #f87171 !important; }
 table.md-watchlist th, table.md-watchlist td { color: #f1f5f9 !important; }
 .md-event-chip { color: #f1f5f9 !important; }
+.md-hero, .md-hero h2, .md-hero .md-hero-price { color: #ffffff !important; }
 </style>
 """,
 }
@@ -839,6 +853,170 @@ def render_strip(active_id: str | None = None) -> dict:
     return data
 
 
+def _london_today() -> date:
+    return datetime.now(LONDON).date()
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def cached_seasonality(symbol: str, as_of: str) -> dict:
+    """Three-year seasonality for one index, from Yahoo daily closes."""
+    candles = fetch_candles(symbol, interval="1d", span="5y")
+    return seasonality_from_candles(candles, date.fromisoformat(as_of))
+
+
+@st.cache_data(ttl=21600, show_spinner=False)
+def cached_insider(ticker: str, as_of: str) -> dict:
+    """Form 4 filings for one US ticker, cached for six hours."""
+    return fetch_us_insider_trades(ticker, today=date.fromisoformat(as_of))
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def cached_bluesky(query: str) -> dict:
+    """Public Bluesky posts for a search. No tone is added."""
+    return fetch_bluesky_posts(query)
+
+
+def _sentiment_for(subject: str) -> dict:
+    history = (st.session_state.get("macro_sentiment") or {}).get(subject) or {}
+    return sentiment_view(history, _london_today())
+
+
+def _signed_points(value: float | None) -> str:
+    if value is None:
+        return "—"
+    return f"{value:+.0f}"
+
+
+def _render_sentiment_card(subject: str, label: str) -> None:
+    """Today's imported sentiment. A missing day stays blank."""
+    view = _sentiment_for(subject)
+    st.markdown(f"**Sentiment — {html.escape(label)}**")
+    if view["score"] is None:
+        st.caption("No scored sentiment for today. Confirm an X import on the home page, with at least 3 posts. Fewer posts stay low volume and are not turned into a number.")
+    else:
+        st.metric("Today", _signed_points(view["score"]))
+        if view["label"]:
+            change = view["change"]
+            st.write(f"{view['label']} · {_signed_points(change)} versus 7 days ago.")
+        elif view["change"] is None:
+            st.caption("Not enough saved days for a 7-day change. That needs a scored day on each of the last 3 days, and on each of the 3 days a week earlier.")
+        else:
+            st.caption(f"{_signed_points(view['change'])} versus 7 days ago. Inside the quiet band, so it is not labelled improving or worsening.")
+        if view["low_volume"]:
+            st.caption("Low volume. News scores are not connected, so this number is the imported X score on its own.")
+        else:
+            st.caption(f"News {_signed_points(view['news'])} · X {_signed_points(view['social'])}. Combined is 60% news and 40% X.")
+    if view["series"]:
+        frame = pd.DataFrame(view["series"])
+        frame["date"] = frame["date"].astype(str)
+        chart = frame.set_index("date")[["combined", "social"]]
+        st.line_chart(chart, height=180)
+        st.caption("Saved days only, from −100 to +100. A day that was not imported is left out.")
+    else:
+        st.caption("No 30-day line yet. Each confirmed import adds that day's point.")
+    st.caption("Sentiment is an input, not a recommendation to trade.")
+
+
+def _render_social(subject: str, search: str) -> None:
+    """X posts from a confirmed import, plus unscored Bluesky posts when the feed answers."""
+    st.markdown(f"**Social posts mentioning {html.escape(search)}**")
+    choice = st.radio("Source", ["All", "Bluesky", "Reddit", "X"], horizontal=True, key=f"macro_social_{subject}")
+    view = _sentiment_for(subject)
+    latest = view.get("latest") or {}
+    posts = latest.get("posts") if isinstance(latest.get("posts"), list) else []
+    if choice in {"All", "X"}:
+        if not posts:
+            st.caption("No X data imported for this yet. Use Import X sentiment on the home page.")
+        else:
+            st.caption(f"Imported {latest.get('date')}. {latest.get('summary') or ''}")
+            for post in posts:
+                tone = str(post.get("tone") or "neutral")
+                st.markdown(f"**{html.escape(str(post.get('author') or ''))}** · {html.escape(tone)}")
+                st.write(str(post.get("text") or ""))
+                link = str(post.get("link") or "")
+                if link.startswith("https://") or link.startswith("http://"):
+                    st.markdown(f"[Open post]({link})")
+    if choice in {"All", "Bluesky"}:
+        try:
+            feed = cached_bluesky(search)
+        except Exception:
+            feed = {"available": False, "posts": []}
+        if not feed.get("available"):
+            st.caption("Bluesky feed unavailable.")
+        elif not feed.get("posts"):
+            st.caption("No recent Bluesky posts for this search.")
+        else:
+            st.caption("Bluesky posts are unscored. This desk does not assign them a tone.")
+            for post in feed["posts"]:
+                st.markdown(f"**{html.escape(str(post.get('author') or ''))}** · unscored")
+                st.write(str(post.get("text") or ""))
+    if choice == "Reddit":
+        st.caption("Reddit is not connected. Its free API needs an app registration, so this tab stays empty.")
+
+
+def _news_html(entries: list[dict]) -> str:
+    """Headlines with a thumbnail when the feed published one."""
+    blocks: list[str] = []
+    for entry in entries[:10]:
+        if not isinstance(entry, dict) or not entry.get("title") or not entry.get("url"):
+            continue
+        title = html.escape(str(entry["title"]))
+        url = html.escape(str(entry["url"]), quote=True)
+        meta = " · ".join(part for part in (str(entry.get("date") or ""), str(entry.get("source") or "")) if part)
+        image = entry.get("image") or entry.get("favicon")
+        thumb = ""
+        if isinstance(image, str) and image.startswith("https://"):
+            safe = html.escape(image, quote=True)
+            thumb = f'<img src="{safe}" alt="" width="48" height="48" style="object-fit:cover;border-radius:6px;flex:none">'
+        blocks.append(
+            f'<div class="md-news-item" style="display:flex;gap:0.6rem;align-items:flex-start">{thumb}'
+            f'<div><a href="{url}" target="_blank" rel="noopener">{title}</a>'
+            f'<div class="md-news-meta">{html.escape(meta)}</div></div></div>'
+        )
+    return "".join(blocks)
+
+
+def _pct_text(value: float | None) -> str:
+    if value is None:
+        return "not published"
+    return f"{value:+.1f}%"
+
+
+def _render_seasonality(item: dict) -> None:
+    """Year-to-date path for this year and the previous two, from daily closes."""
+    st.markdown("### Seasonality — year to date vs previous years")
+    as_of = _london_today().isoformat()
+    try:
+        report = cached_seasonality(item["symbol"], as_of)
+    except Exception:
+        st.caption("Seasonality unavailable. Yahoo did not publish enough daily closes.")
+        return
+    years = report["years"]
+    summary = report["summary"]
+    st.write(
+        f"{item['name']} is {_pct_text(summary.get(str(years[0])))} so far in {years[0]}. "
+        f"Same point in {years[1]}: {_pct_text(summary.get(str(years[1])))}. "
+        f"In {years[2]}: {_pct_text(summary.get(str(years[2])))}."
+    )
+    chart = pd.DataFrame(report["chart"], index=report["labels"])
+    st.line_chart(chart, height=260)
+    st.caption("Each line is the percent change from that year's first published close. The current year stops at the latest close.")
+    months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+    rows = []
+    for year in years:
+        row: dict[str, object] = {"Year": str(year)}
+        for month, value in zip(months, report["monthly"][str(year)]):
+            row[month] = None if value is None else round(float(value), 1)
+        rows.append(row)
+    average_row: dict[str, object] = {"Year": report["average_label"]}
+    for month, value in zip(months, report["average"]):
+        average_row[month] = None if value is None else round(float(value), 1)
+    rows.append(average_row)
+    st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")
+    partial = months[int(report["partial_month"]) - 1]
+    st.caption(f"{partial} {years[0]} is partial. Later months are blank. A blank cell means that close was not published.")
+
+
 def render_index_page(index_id: str, data: dict, calendar: dict | None) -> None:
     """One index on one page: hero, 60-session chart, news, breadth, red folder."""
     item = INDEX_BY_ID[index_id]
@@ -872,6 +1050,12 @@ def render_index_page(index_id: str, data: dict, calendar: dict | None) -> None:
         unsafe_allow_html=True,
     )
     st.caption("Trend: Bullish if the latest close is above the 50-period EMA and the 50 EMA is rising, otherwise Bearish (spec section 4).")
+    _render_seasonality(item)
+    left, right = st.columns(2)
+    with left:
+        _render_sentiment_card(index_id, item["label"])
+    with right:
+        _render_social(index_id, item["label"])
     st.markdown("## Recent news")
     try:
         news = fetch_news_rss(f"{item['label']} {item['name']} market news") or []
@@ -879,13 +1063,9 @@ def render_index_page(index_id: str, data: dict, calendar: dict | None) -> None:
         news = []
     if not news:
         st.caption("News unavailable.")
-    for entry in news[:10]:
-        if not isinstance(entry, dict) or not entry.get("title") or not entry.get("url"):
-            continue
-        title = html.escape(str(entry["title"]))
-        url = html.escape(str(entry["url"]), quote=True)
-        meta = " · ".join(part for part in (str(entry.get("date") or ""), str(entry.get("source") or "")) if part)
-        st.markdown(f'<div class="md-news-item"><a href="{url}" target="_blank" rel="noopener">{title}</a><div class="md-news-meta">{html.escape(meta)}</div></div>', unsafe_allow_html=True)
+    else:
+        st.markdown(_news_html(news), unsafe_allow_html=True)
+        st.caption("Headlines come from the public news feed. A sentiment tag is not shown, because no news-score source is connected.")
     st.markdown("## Underlying breadth")
     breadth = info.get("breadth") or {}
     if not breadth.get("ready"):
@@ -936,12 +1116,16 @@ def _hydrate_watchlist() -> None:
         return
     cached = load_watchlist_cache()
     st.session_state.macro_added = cached.get("added") or {}
+    st.session_state.macro_sentiment = cached.get("sentiment") if isinstance(cached.get("sentiment"), dict) else {}
     st.session_state.macro_hydrated = True
 
 
 def _remember_watchlist() -> None:
     try:
-        save_watchlist_cache({"added": st.session_state.get("macro_added") or {}})
+        save_watchlist_cache({
+            "added": st.session_state.get("macro_added") or {},
+            "sentiment": st.session_state.get("macro_sentiment") or {},
+        })
     except OSError:
         st.warning("The new watchlist is showing, but it could not be saved for the next page load.")
 
@@ -1068,10 +1252,11 @@ def _render_watchlist() -> None:
     added = st.session_state.get("macro_added") or {}
     if not added:
         st.caption("Your watchlist is empty – search above to add a stock.")
+        _render_x_import()
         return
     rows = [_watchlist_row(snapshot) for snapshot in added.values()]
     rows.sort(key=lambda row: str(row.get("ticker") or ""))
-    header = "<tr><th>Stock</th><th>Price</th><th>Analyst target</th><th>50MA</th><th>200MA</th><th>Weekly</th><th>Daily</th><th>Fwd P/E</th><th></th></tr>"
+    header = "<tr><th>Stock</th><th>Price</th><th>Analyst target</th><th>50MA</th><th>200MA</th><th>Weekly</th><th>Daily</th><th>Fwd P/E</th><th>Sentiment</th><th></th></tr>"
     body_rows: list[str] = []
     for row in rows:
         ticker = str(row.get("ticker") or "")
@@ -1094,16 +1279,33 @@ def _render_watchlist() -> None:
             if value == "Bearish":
                 return '<span class="md-down">Bearish</span>'
             return "—"
-        forward_pe = f"{row['forward_pe']:.1f}x" if isinstance(row.get("forward_pe"), (int, float)) else "n/m"
+        forward_value = row.get("forward_pe")
+        forward_pe = f"{forward_value:.1f}x" if isinstance(forward_value, (int, float)) and forward_value > 0 else "n/m"
         parent = f" · {row['parent']}" if row.get("parent") else ""
+        sentiment_view_row = _sentiment_for(ticker)
+        if sentiment_view_row["score"] is None:
+            sentiment_cell = "—"
+        else:
+            sentiment_cell = _signed_points(sentiment_view_row["score"])
+            if sentiment_view_row["change"] is not None:
+                arrow = "▲" if sentiment_view_row["change"] >= 0 else "▼"
+                sentiment_cell += f" {arrow} {abs(sentiment_view_row['change']):.0f}"
+        buying = ""
+        if re.fullmatch(r"[A-Z]{1,5}", ticker):
+            try:
+                filing = cached_insider(ticker, _london_today().isoformat())
+                if (filing.get("summary") or {}).get("insider_buying"):
+                    buying = "<br><span class='md-up'>Insider buying</span>"
+            except Exception:
+                buying = ""
         stock_href = _link_with_theme("stock=" + urllib.parse.quote(ticker))
         body_rows.append(
             f"<tr><td><a href='{stock_href}' target='_self'><strong>{html.escape(ticker)}</strong></a><br>"
-            f"{html.escape(str(row.get('name') or ''))}{html.escape(parent)}</td>"
+            f"{html.escape(str(row.get('name') or ''))}{html.escape(parent)}{buying}</td>"
             f"<td class='md-mono'>{price}</td><td class='md-mono'>{target_cell}</td>"
             f"<td>{above_below(row.get('above50'))}</td><td>{above_below(row.get('above200'))}</td>"
             f"<td>{bull_bear(row.get('weekly'))}</td><td>{bull_bear(row.get('daily'))}</td>"
-            f"<td class='md-mono'>{forward_pe}</td><td></td></tr>"
+            f"<td class='md-mono'>{forward_pe}</td><td class='md-mono'>{html.escape(sentiment_cell)}</td><td></td></tr>"
         )
     st.markdown(_macro_css(_current_theme()) + f'<div style="overflow-x:auto"><table class="md-watchlist">{header}{"".join(body_rows)}</table></div>', unsafe_allow_html=True)
     for row in rows:
@@ -1112,22 +1314,195 @@ def _render_watchlist() -> None:
             _remove_ticker(ticker)
             st.rerun()
     st.caption("Click a stock to open its page. Or select an index above for its chart, news, red folder events and constituents.")
+    _render_x_import()
 
 
-def _render_stock_placeholder(ticker: str) -> None:
-    """Stock detail placeholder (spec 3.4) — design to be supplied later."""
+def _import_aliases() -> dict[str, str]:
+    """Watchlist tickers and company names the pasted import is allowed to name."""
+    aliases: dict[str, str] = {}
+    for ticker, snapshot in (st.session_state.get("macro_added") or {}).items():
+        symbol = str(ticker)
+        aliases[symbol.lower()] = symbol
+        name = str((snapshot or {}).get("name") or "").strip().lower()
+        if name:
+            aliases[name] = symbol
+    return aliases
+
+
+def _grok_prompt() -> str:
+    names = ["DAX", "UK100", "US100", "US30", "US500", *list((st.session_state.get("macro_added") or {}).keys())]
+    return (
+        "For each of these: " + ", ".join(names) + ".\n"
+        "Look at X posts from the last 24 hours that mention it. Reply in exactly this format, one block per item, with nothing else:\n"
+        "SUBJECT: the name exactly as I gave it\n"
+        "TONE: bullish, neutral or bearish\n"
+        "SCORE: whole number from -100 (very bearish) to 100 (very bullish)\n"
+        "SUMMARY: one sentence on what is driving the mood\n"
+        "POST: @handle | bullish, neutral or bearish | exact post text | link\n"
+        "(3 to 5 POST lines, real posts only)\n"
+        "---"
+    )
+
+
+def _render_x_import() -> None:
+    """Paste a Grok answer, review the parse, then save it for today."""
+    st.markdown("### Import X sentiment from Grok")
+    st.caption("Give Grok the prompt, paste its answer, and check the table before saving. The desk files each block under the subject Grok named. It does not call an AI service.")
+    st.code(_grok_prompt(), language=None)
+    pasted = st.text_area("Grok’s answer", placeholder="Paste Grok’s answer here", key="macro_grok_paste")
+    if st.button("Read answer", key="macro_grok_read"):
+        st.session_state.macro_import_preview = parse_grok_import(pasted, _import_aliases())
+    preview = st.session_state.get("macro_import_preview")
+    if not isinstance(preview, dict):
+        return
+    items = preview.get("items") or []
+    unknown = preview.get("unknown") or []
+    if not items:
+        st.caption("Nothing in the expected format was found. Check that Grok kept the SUBJECT, TONE and SCORE lines." + (f" Not recognised, so skipped: {', '.join(unknown)}." if unknown else ""))
+        return
+    st.caption(f"{len(items)} found." + (f" Not recognised, so skipped: {', '.join(unknown)}." if unknown else ""))
+    st.dataframe(
+        pd.DataFrame([
+            {"Filed under": item["subject"], "Tone": item["tone"], "Score": item["score"], "Posts": len(item["posts"]), "Summary": item["summary"]}
+            for item in items
+        ]),
+        hide_index=True,
+        width="stretch",
+    )
+    if st.button("Save to the desk", key="macro_grok_save"):
+        store = dict(st.session_state.get("macro_sentiment") or {})
+        day = _london_today().isoformat()
+        for item in items:
+            days = dict(store.get(item["subject"]) or {})
+            days[day] = {"score": item["score"], "tone": item["tone"], "summary": item["summary"], "posts": item["posts"]}
+            store[item["subject"]] = days
+        st.session_state.macro_sentiment = store
+        st.session_state.macro_import_preview = None
+        _remember_watchlist()
+        st.success("Saved. Open that index or stock to see it in the sentiment card and the X tab.")
+
+
+def _tone_pill(value: str | None) -> str:
+    if value == "Bullish":
+        return '<span class="md-up">Bullish</span>'
+    if value == "Bearish":
+        return '<span class="md-down">Bearish</span>'
+    return "—"
+
+
+def _above_pill(value: bool | None, label: str) -> str:
+    if value is None:
+        return label
+    word = "Above" if value else "Below"
+    colour = "md-up" if value else "md-down"
+    return f'<span class="{colour}">{word}</span> {label}'
+
+
+def _render_insider_block(ticker: str) -> None:
+    st.markdown("### Insider transactions")
+    st.caption("Last 30 days. US listings use SEC Form 4. An open-market buy is code P. Awards and option exercises stay marked other. The trade date and the filing date are both shown.")
+    if not re.fullmatch(r"[A-Z]{1,5}", ticker):
+        st.caption("Director dealings for this listing are not connected. US stocks are the ones read from SEC Form 4.")
+        return
+    try:
+        filing = cached_insider(ticker, _london_today().isoformat())
+    except Exception:
+        st.caption("SEC Form 4 filings could not be read for this ticker.")
+        return
+    if not filing.get("available"):
+        st.caption("SEC Form 4 filings could not be read for this ticker.")
+        return
+    summary = filing.get("summary") or {}
+    trades = summary.get("trades") or []
+    if not trades:
+        st.caption("No Form 4 transactions in the last 30 days were published.")
+        return
+    net = summary.get("net_value")
+    if isinstance(net, (int, float)):
+        if net > 0:
+            label = "Net buying"
+        elif net < 0:
+            label = "Net selling"
+        else:
+            label = "Flat"
+        st.write(f"{label}: {_money(abs(net)) or '—'}")
+    else:
+        st.caption("A net value is not shown, because one or more filings did not publish a price.")
+    body = []
+    for trade in trades:
+        kind = {"buy": "Buy", "sell": "Sell"}.get(str(trade.get("type")), "Other")
+        body.append(
+            "<tr>"
+            f"<td>{html.escape(str(trade.get('traded_at') or '—'))}</td>"
+            f"<td>{html.escape(str(trade.get('filed_at') or '—'))}</td>"
+            f"<td>{html.escape(str(trade.get('person') or '—'))}</td>"
+            f"<td>{html.escape(str(trade.get('role') or '—'))}</td>"
+            f"<td>{html.escape(kind)}</td>"
+            f"<td class='md-mono'>{html.escape(_money(trade.get('value')) or '—')}</td>"
+            "</tr>"
+        )
+    header = "<tr><th>Traded</th><th>Filed</th><th>Insider</th><th>Role</th><th>Type</th><th>Value</th></tr>"
+    st.markdown(
+        _macro_css(_current_theme()) + f'<div style="overflow-x:auto"><table class="md-watchlist">{header}{"".join(body)}</table></div>',
+        unsafe_allow_html=True,
+    )
+
+
+def _render_government_block(ticker: str) -> None:
+    st.markdown("### Government officials’ trades")
+    if re.fullmatch(r"[A-Z]{1,5}", ticker):
+        st.caption("US officials’ trades are disclosed in value ranges, often days to weeks after the trade. No filings feed is connected, so this table stays empty rather than showing sample names.")
+        return
+    st.caption("US officials’ trades are only disclosed for US-listed stocks. Other countries publish interests differently, and this desk does not show those as trades.")
+
+
+def _render_stock_page(ticker: str) -> None:
+    """One watchlist stock: price, sentiment, news, insider filings."""
     if st.button("← Back to the watchlist", key="macro_stock_back"):
         _clear_macro_route()
         st.rerun()
     added = st.session_state.get("macro_added") or {}
-    snapshot = added.get(ticker.upper())
-    st.markdown(f"## {html.escape(ticker.upper())}")
-    if snapshot is not None:
-        price = snapshot.get("price")
-        st.write(f"Price: {_money(price, _currency_symbol(snapshot.get('currency'))) or '—'}")
-        if snapshot.get("name"):
-            st.write(str(snapshot["name"]))
-    st.info("To be designed – coming soon")
+    snapshot = added.get(ticker)
+    if snapshot is None:
+        st.warning(f"{ticker} is not on the watchlist.")
+        return
+    row = _watchlist_row(snapshot)
+    parent = INDEX_BY_LABEL.get(str(row.get("parent") or ""))
+    if parent is not None:
+        st.markdown(f"[Open {parent['label']}]({_link_with_theme('index=' + parent['id'])})")
+    symbol = _currency_symbol(row.get("currency"))
+    price = _money(row.get("price"), symbol) or "—"
+    target = _money(row.get("target"), symbol) or "—"
+    upside = _percent(row.get("upside"), 1, signed=True) or "—"
+    forward_value = row.get("forward_pe")
+    forward = f"{forward_value:.1f}x" if isinstance(forward_value, (int, float)) and forward_value > 0 else "n/m"
+    gradient = parent["gradient"] if parent else "linear-gradient(100deg,#334155,#64748b)"
+    name = html.escape(str(row.get("name") or ticker))
+    st.markdown(
+        f'<div class="md-hero" style="background:{gradient}">'
+        f"<h2>{name} ({html.escape(ticker)})</h2>"
+        f'<div class="md-hero-price">{html.escape(price)} · analyst target {html.escape(target)} ({html.escape(upside)}) · fwd P/E {html.escape(forward)}</div>'
+        f'<div class="md-pills">{_above_pill(row.get("above50"), "50MA")} {_above_pill(row.get("above200"), "200MA")} {_tone_pill(row.get("weekly"))} Weekly {_tone_pill(row.get("daily"))} Daily</div>'
+        f"</div>",
+        unsafe_allow_html=True,
+    )
+    left, right = st.columns(2)
+    with left:
+        _render_sentiment_card(ticker, ticker)
+    with right:
+        _render_social(ticker, "$" + ticker)
+    st.markdown("### Recent news")
+    try:
+        news = fetch_news_rss(f"{ticker} {row.get('name') or ''} stock") or []
+    except Exception:
+        news = []
+    if news:
+        st.markdown(_news_html(news), unsafe_allow_html=True)
+        st.caption("Headlines come from the public news feed. A sentiment tag is not shown, because no news-score source is connected.")
+    else:
+        st.caption("News unavailable.")
+    _render_insider_block(ticker)
+    _render_government_block(ticker)
 
 
 # ---------------------------------------------------------------------------
@@ -1185,7 +1560,7 @@ def render_macro_desk() -> None:
     render_event_detail()
     render_calendar(calendar, index_id=index_id)
     if stock is not None:
-        _render_stock_placeholder(stock)
+        _render_stock_page(stock)
         return
     if index_id is not None:
         render_index_page(index_id, data, calendar)
@@ -1195,7 +1570,8 @@ def render_macro_desk() -> None:
         "Trend: Bullish if the latest close is above the 50-period EMA and the 50 EMA is rising, otherwise Bearish. "
         "Breadth and trends are recalculated at most every 5 minutes for indices and every 30 minutes for breadth. "
         "Red-folder events are high-impact only, from the Forex Factory calendar, in UK time. "
-        "Watchlist names you add stay on this running app until it restarts; they are not written back to the repo."
+        "Watchlist names you add, and X sentiment you save, stay on this running app until it restarts. They are not written back to the repo. "
+        "Sentiment is an input, not a recommendation to trade."
     )
 
 
