@@ -23,6 +23,40 @@ export type Stock = {
   manual: Record<string, ManualValue>; history: { recordedAt: string; target: number }[];
   research?: Research;
 };
+export type SpeculativeDraft = {
+  idea: string; hasToGoRight: string; proveWrong: string; biggestRisk: string; catalyst: string; museChallenge: string; museDetail: string;
+};
+export const EMPTY_SPECULATIVE_DRAFT: SpeculativeDraft = { idea: "", hasToGoRight: "", proveWrong: "", biggestRisk: "", catalyst: "", museChallenge: "", museDetail: "" };
+export const SPECULATIVE_DRAFT_START = "<!-- DRAFT-IT-TOGETHER: SPECULATIVE THESIS -->";
+export const SPECULATIVE_DRAFT_END = "<!-- END DRAFT-IT-TOGETHER -->";
+export function isSpeculativeDraftEmpty(d: SpeculativeDraft) { return Object.values(d).every(v => !v.trim()); }
+// The collaborative "Draft it together" thesis is stored inside the existing
+// notes column, as one JSON block between the markers above — no new table,
+// column or API action. parseSpeculativeDraft splits it back out; the Notes
+// tab only ever shows the free-text rest, and a refresh never touches it
+// (unlike the auto-generated research, which is regenerated on refresh).
+// A malformed block is never deleted: it is returned as ordinary notes.
+export function parseSpeculativeDraft(notes: string): { draft: SpeculativeDraft; rest: string } {
+  const start = notes.indexOf(SPECULATIVE_DRAFT_START);
+  if (start < 0) return { draft: { ...EMPTY_SPECULATIVE_DRAFT }, rest: notes };
+  const end = notes.indexOf(SPECULATIVE_DRAFT_END, start);
+  if (end < 0) return { draft: { ...EMPTY_SPECULATIVE_DRAFT }, rest: notes };
+  const raw = notes.slice(start + SPECULATIVE_DRAFT_START.length, end).trim();
+  let parsed: Partial<SpeculativeDraft> = {};
+  try { parsed = JSON.parse(raw); } catch { return { draft: { ...EMPTY_SPECULATIVE_DRAFT }, rest: notes }; }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return { draft: { ...EMPTY_SPECULATIVE_DRAFT }, rest: notes };
+  const draft = { ...EMPTY_SPECULATIVE_DRAFT };
+  for (const k of Object.keys(EMPTY_SPECULATIVE_DRAFT) as (keyof SpeculativeDraft)[]) if (typeof parsed[k] === "string") draft[k] = parsed[k].slice(0, 1500);
+  const rest = (notes.slice(0, start) + notes.slice(end + SPECULATIVE_DRAFT_END.length)).replace(/\n{3,}/g, "\n\n").trim();
+  return { draft, rest };
+}
+export function serializeSpeculativeDraft(draft: SpeculativeDraft, notes: string): string {
+  const { rest } = parseSpeculativeDraft(notes);
+  if (isSpeculativeDraftEmpty(draft)) return rest;
+  const block = `${SPECULATIVE_DRAFT_START}\n${JSON.stringify(draft)}\n${SPECULATIVE_DRAFT_END}`;
+  const combined = rest ? `${rest}\n\n${block}` : block;
+  return combined.slice(0, 12000);
+}
 export type Criterion = {letter:string;name:string;status:"pass"|"partial"|"fail"|"unknown";evidence:string;sourceKeys:string[]};
 export type Research = {
   version:number; generatedAt:string; quoteAt?:string; themes:string[]; title:string; summary:string; styleFit:string;
