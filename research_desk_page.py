@@ -235,6 +235,79 @@ table.md-watchlist th, table.md-watchlist td { text-align: left; padding: 0.45re
 </style>
 """
 
+# ---------------------------------------------------------------------------
+# Explicit Light / Dark themes.
+#
+# Bug fixed here (reported 2026-11-26): Light mode stayed dark. The old code
+# had no explicit light theme at all — the base CSS above left cards
+# transparent (``background: var(--md-card-bg, transparent)``) and only
+# injected a dark card style when Dark was chosen, so on a device whose
+# system theme is dark, Streamlit's own chrome stayed dark and Light
+# mode looked dark too. The same bug was found in the standalone preview
+# (no explicit light palette, toggle recomputed from matchMedia).
+#
+# Fix, mirroring the preview fix: BOTH themes now inject a full, explicit
+# palette — page background, text, card background, muted text, pills —
+# placed AFTER the base CSS above, so the chosen theme always wins over
+# Streamlit's system theme. Light is genuinely light (pale background,
+# white cards, dark text); Dark is genuinely dark. The toggle in
+# render_macro_desk() swaps the explicit theme, it does not rely on the
+# system preference. Streamlit runs the theme choice server-side, so there
+# is no prefers-color-scheme detection here and no "before first paint"
+# script as in the static preview — the explicit CSS is injected on every
+# render of this page, which is the Streamlit equivalent. It is scoped to
+# this page only (it is only injected by render_macro_desk() /
+# _macro_css()); the Data Hub / Trading Edge page is untouched.
+# ---------------------------------------------------------------------------
+MACRO_THEME_CSS: dict[str, str] = {
+    "Light": """
+<style>
+.stApp, [data-testid="stAppViewContainer"] { background: #f8fafc !important; color: #111827 !important; color-scheme: light; }
+.stApp h1, .stApp h2, .stApp h3, [data-testid="stMarkdownContainer"] { color: #111827 !important; }
+.md-card { background: #ffffff !important; color: #111827 !important; border-color: rgba(17,24,39,0.15) !important; }
+.md-card a { color: #111827 !important; }
+.md-gauge-label, .md-event-chip .md-event-meta, .md-news-meta { color: #4b5563 !important; }
+.md-missing { background: rgba(107,114,128,0.15) !important; color: #4b5563 !important; }
+.md-bull { background: rgba(21,128,61,0.12) !important; color: #15803d !important; }
+.md-bear { background: rgba(180,35,24,0.10) !important; color: #b42318 !important; }
+.md-up { color: #15803d !important; } .md-down { color: #b42318 !important; }
+table.md-watchlist th, table.md-watchlist td { color: #111827 !important; }
+.md-event-chip { color: #111827 !important; }
+</style>
+""",
+    "Dark": """
+<style>
+.stApp, [data-testid="stAppViewContainer"] { background: #0f172a !important; color: #f1f5f9 !important; color-scheme: dark; }
+.stApp h1, .stApp h2, .stApp h3, [data-testid="stMarkdownContainer"] { color: #f1f5f9 !important; }
+.md-card { background: #1e293b !important; color: #f1f5f9 !important; border-color: rgba(241,245,249,0.18) !important; }
+.md-card a { color: #f1f5f9 !important; }
+.md-gauge-label, .md-event-chip .md-event-meta, .md-news-meta { color: #cbd5e1 !important; }
+.md-missing { background: rgba(148,163,184,0.18) !important; color: #cbd5e1 !important; }
+.md-bull { background: rgba(74,222,128,0.16) !important; color: #4ade80 !important; }
+.md-bear { background: rgba(248,113,113,0.16) !important; color: #f87171 !important; }
+.md-up { color: #4ade80 !important; } .md-down { color: #f87171 !important; }
+table.md-watchlist th, table.md-watchlist td { color: #f1f5f9 !important; }
+.md-event-chip { color: #f1f5f9 !important; }
+</style>
+""",
+}
+
+
+def _current_theme() -> str:
+    """The theme chosen with the toggle; Light unless Dark was chosen."""
+    try:
+        theme = st.session_state.get("macro_theme", "Light")
+    except Exception:
+        return "Light"
+    return "Dark" if theme == "Dark" else "Light"
+
+
+def _macro_css(theme: str | None = None) -> str:
+    """Base CSS plus the explicit palette for the chosen theme, theme last
+    so it always wins over the base rules and over Streamlit's system theme."""
+    chosen = "Dark" if theme == "Dark" else "Light"
+    return MACRO_CSS + MACRO_THEME_CSS[chosen]
+
 
 # ---------------------------------------------------------------------------
 # Data loading — cached, honest unavailable states, no invented figures.
@@ -677,7 +750,7 @@ def render_strip(active_id: str | None = None) -> dict:
             data[item["id"]]["breadth"] = cached_breadth(item["id"])
         except Exception:
             data[item["id"]]["breadth"] = {"ready": False}
-    st.markdown(MACRO_CSS + '<div class="md-strip">' + "".join(_strip_card(item, data[item["id"]], active_id == item["id"]) for item in MACRO_INDICES) + "</div>", unsafe_allow_html=True)
+    st.markdown(_macro_css(_current_theme()) + '<div class="md-strip">' + "".join(_strip_card(item, data[item["id"]], active_id == item["id"]) for item in MACRO_INDICES) + "</div>", unsafe_allow_html=True)
     st.caption("50MA: constituents above their 50-day moving average. Highs: constituents whose current session high exceeds the previous session's high. Click a card to open that index.")
     return data
 
@@ -947,7 +1020,7 @@ def _render_watchlist() -> None:
             f"<td>{bull_bear(row.get('weekly'))}</td><td>{bull_bear(row.get('daily'))}</td>"
             f"<td class='md-mono'>{forward_pe}</td><td></td></tr>"
         )
-    st.markdown(MACRO_CSS + f'<div style="overflow-x:auto"><table class="md-watchlist">{header}{"".join(body_rows)}</table></div>', unsafe_allow_html=True)
+    st.markdown(_macro_css(_current_theme()) + f'<div style="overflow-x:auto"><table class="md-watchlist">{header}{"".join(body_rows)}</table></div>', unsafe_allow_html=True)
     for row in rows:
         ticker = str(row.get("ticker") or "")
         if st.button("✕", key=f"macro_remove_{ticker}", help=f"Remove {ticker} from the watchlist"):
@@ -1006,10 +1079,12 @@ def render_macro_desk() -> None:
         st.session_state.macro_theme = "Light"
     theme = st.radio("Theme", options=["Light", "Dark"], index=0 if st.session_state.macro_theme == "Light" else 1, horizontal=True, key="macro_theme_radio")
     st.session_state.macro_theme = theme
-    # The manual toggle only restyles this page's own cards and pills;
-    # Streamlit's own chrome follows the system theme.
-    if theme == "Dark":
-        st.markdown("<style>.md-card{background:#1f2937;color:#f9fafb} .md-card a{color:#f9fafb} .md-pill.md-missing{color:#d1d5db}</style>", unsafe_allow_html=True)
+    # Both themes inject a full explicit palette (see MACRO_THEME_CSS):
+    # Light used to inject nothing, so on a dark-system device Streamlit's
+    # dark chrome showed through and Light mode looked dark. The chosen
+    # theme now always wins over the system theme, for this page only.
+    # Streamlit's sidebar / chrome still follows the system theme.
+    st.markdown(MACRO_THEME_CSS[theme], unsafe_allow_html=True)
     index_id = _requested_index()
     stock = _requested_stock()
     try:
