@@ -10,6 +10,9 @@ auto-refresh on a stale load follow the React desk (PR #55). Concurrent
 refresh and up to five headlines per stock follow PR #56. Company-name
 search, insider trades, five-year closes, multi-timeframe macro trends with
 news, and near-high/low breadth follow PR #57 (research-desk/lib/macro.ts).
+Red-folder (high-impact) economic events for the next 7 days come from
+Forex Factory's free weekly calendar JSON, filtered to High impact only
+and shown per asset and per group in UK time.
 The macro view is grouped — Indices, then Crypto, then Forex — and clicking
 an asset opens its own detail view with its news and, for indices, its
 breadth. The Technical/Sentiment/Fundamental spider lives only on
@@ -35,6 +38,7 @@ import urllib.parse
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 import streamlit as st
@@ -44,6 +48,7 @@ from research_desk_quotes import (
     fetch_candles,
     fetch_new_snapshot,
     fetch_news_rss,
+    fetch_red_folder_events,
     fetch_text,
     fetch_trend_snapshot,
     normalize_ticker,
@@ -75,6 +80,38 @@ MACRO_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("Crypto", ("BTCUSD", "ETHUSD")),
     ("Forex", ("EUR/USD", "GBP/JPY", "USD/JPY")),
 )
+
+# UK time for red-folder event times. Falls back to UTC where the system
+# has no Europe/London zone data.
+try:
+    LONDON = ZoneInfo("Europe/London")
+except Exception:
+    LONDON = timezone.utc
+
+# Currencies whose high-impact events move each macro asset. Crypto has no
+# central-bank calendar of its own, so it follows US events — the main
+# macro driver for BTC/ETH — and the detail view says so.
+MACRO_EVENT_CURRENCIES: dict[str, tuple[str, ...]] = {
+    "US500": ("USD",),
+    "US100": ("USD",),
+    "US30": ("USD",),
+    "UK100": ("GBP",),
+    "GER30": ("EUR",),
+    "BTCUSD": ("USD",),
+    "ETHUSD": ("USD",),
+    "EUR/USD": ("EUR", "USD"),
+    "GBP/JPY": ("GBP", "JPY"),
+    "USD/JPY": ("USD", "JPY"),
+}
+
+# Currencies behind each macro group in the overview, for the compact
+# red-folder list under each group: Indices are US + UK + German events,
+# Crypto is US events, Forex is every pair currency.
+MACRO_GROUP_CURRENCIES: dict[str, tuple[str, ...]] = {
+    "Indices": ("USD", "GBP", "EUR"),
+    "Crypto": ("USD",),
+    "Forex": ("EUR", "USD", "GBP", "JPY"),
+}
 
 CLOSE_WINDOWS = (90, 365, 1825)
 DEFAULT_CLOSE_WINDOW = 365
@@ -527,6 +564,10 @@ MACRO_CSS = """
   background: #6b7280; color: #fff; font-weight: 700; font-size: 1rem;
 }
 .macro-news-meta { font-size: 0.75rem; color: rgba(128,128,128,0.9); }
+.macro-events { font-size: 0.85rem; line-height: 1.45; margin-top: 0.45rem; border-top: 1px solid rgba(180,35,24,0.4); padding-top: 0.35rem; }
+.macro-events-title { font-weight: 700; color: #b42318; }
+.macro-event { margin-top: 0.25rem; }
+.macro-event-meta { font-size: 0.75rem; color: rgba(128,128,128,0.9); }
 </style>
 """
 
@@ -573,11 +614,92 @@ def _news_html(news: list | None, limit: int = 5) -> str:
     return "".join(parts)
 
 
-def macro_trends_html(rows: list[dict], selected: str | None = None) -> str:
+
+def _events_for(calendar: dict | None, currencies: tuple[str, ...]) -> list[dict]:
+    """High-impact events from one fetched calendar, for these currencies."""
+    if not isinstance(calendar, dict):
+        return []
+    events = calendar.get("events")
+    if not isinstance(events, list):
+        return []
+    wanted = set(currencies)
+    return [
+        event
+        for event in events
+        if isinstance(event, dict) and event.get("country") in wanted
+    ]
+
+
+def _red_folder_event_html(event: dict) -> str:
+    """One high-impact event: UK date/time, currency, title, forecast/previous."""
+    when = event.get("date")
+    if isinstance(when, datetime):
+        when_text = when.astimezone(LONDON).strftime("%a %d %b, %H:%M")
+    else:
+        when_text = html.escape(str(when or ""))
+    title = html.escape(str(event.get("title") or ""))
+    country = html.escape(str(event.get("country") or ""))
+    forecast = str(event.get("forecast") or "").strip()
+    previous = str(event.get("previous") or "").strip()
+    meta = " · ".join(
+        part
+        for part in (
+            f"Fcst {forecast}" if forecast else "",
+            f"Prev {previous}" if previous else "",
+        )
+        if part
+    )
+    meta_html = (
+        f"<div class=\"macro-event-meta\">{html.escape(meta)}</div>" if meta else ""
+    )
+    return (
+        f"<div class=\"macro-event\">🔴 <strong>{html.escape(when_text)}</strong>"
+        f" — {country} {title}{meta_html}</div>"
+    )
+
+
+def _red_folder_html(
+    events: list,
+    available: bool,
+    partial: bool,
+    limit: int = 3,
+    heading: str = "Red-folder news — next 7 days (UK time)",
+) -> str:
+    """Compact high-impact (red-folder) event list, or an honest empty state.
+
+    ``events`` are already filtered to the currencies wanted and sorted by
+    date. An unavailable calendar, or a week with no high-impact events
+    for those currencies, is stated as such — never filled in.
+    """
+    parts: list[str] = [
+        "<div class=\"macro-events\">"
+        f"<div class=\"macro-events-title\">🔴 {html.escape(heading)}</div>"
+    ]
+    if not available:
+        parts.append("<div>Economic calendar unavailable</div>")
+    elif not events:
+        parts.append(
+            "<div>No high-impact (red-folder) events in the next 7 days.</div>"
+        )
+    else:
+        parts.extend(_red_folder_event_html(event) for event in events[:limit])
+    if available and partial:
+        parts.append(
+            "<div class=\"macro-event-meta\">Next week's calendar feed was not "
+            "available, so this list may end before the full 7 days.</div>"
+        )
+    parts.append("</div>")
+    return "".join(parts)
+
+
+def macro_trends_html(
+    rows: list[dict], selected: str | None = None, calendar: dict | None = None
+) -> str:
     """Macro assets grouped — Indices, then Crypto, then Forex — each group headed.
 
     Every asset name is a link to its own detail view (``?asset=<label>``).
     The overview shows up to 3 headlines per asset; the detail view shows 5.
+    When ``calendar`` is given, a compact red-folder list follows each group.
     """
     by_label = {str(row.get("label") or ""): row for row in rows}
     sections: list[str] = []
@@ -607,7 +729,23 @@ def macro_trends_html(rows: list[dict], selected: str | None = None) -> str:
                 "</div>"
             )
         if cards:
-            sections.append(f"<h3>{html.escape(group_name)}</h3><div class=\"macro-strip\">" + "".join(cards) + "</div>")
+            section = (
+                f"<h3>{html.escape(group_name)}</h3><div class=\"macro-strip\">"
+                + "".join(cards)
+                + "</div>"
+            )
+            if calendar is not None:
+                group_events = _events_for(
+                    calendar, MACRO_GROUP_CURRENCIES.get(group_name, ())
+                )
+                section += _red_folder_html(
+                    group_events,
+                    bool(calendar.get("available")),
+                    bool(calendar.get("partial")),
+                    limit=3,
+                    heading=f"Red-folder news — {group_name} (next 7 days, UK time)",
+                )
+            sections.append(section)
     return "".join(sections)
 
 
@@ -932,6 +1070,17 @@ def cached_macro_rows() -> list[dict]:
     return load_macro_rows()
 
 
+@st.cache_data(ttl=3600, show_spinner=False)
+def cached_red_folder() -> dict:
+    """All high-impact events for the next 7 days, fetched at most hourly.
+
+    The Forex Factory feed is rate-limited (roughly 2 downloads per 5
+    minutes), so one hourly fetch shared by the overview and every detail
+    view stays well inside that.
+    """
+    return fetch_red_folder_events()
+
+
 def _requested_macro() -> str | None:
     """Macro asset requested via ``?asset=<label>`` (``?breadth=<label>`` still works for old links).
 
@@ -960,8 +1109,8 @@ def cached_breadth(label: str) -> dict:
 def render_macro_trends() -> None:
     """Macro trends, grouped Indices / Crypto / Forex, on the Research Desk page.
 
-    Clicking an asset opens its own detail view (its news and, for indices,
-    its breadth). There is no spider in the macro view.
+    Clicking an asset opens its own detail view (its news, its red-folder
+    list and, for indices, its breadth). There is no spider in the macro view.
     """
     st.markdown("**Macro trends**")
     with st.spinner("Loading macro trends…"):
@@ -970,17 +1119,21 @@ def render_macro_trends() -> None:
         except Exception:
             st.caption("Macro trends could not be loaded.")
             return
+    try:
+        calendar = cached_red_folder()
+    except Exception:
+        calendar = {"events": [], "available": False, "partial": False}
     selected = _requested_macro()
     labels = {str(row.get("label") or "") for row in rows}
     if selected is not None and selected not in labels:
         st.warning(f"{selected} is not a macro asset in this desk.")
         selected = None
     if selected is not None:
-        _render_macro_asset(selected, rows)
+        _render_macro_asset(selected, rows, calendar)
         return
     st.markdown(
         MACRO_CSS
-        + macro_trends_html(rows, selected),
+        + macro_trends_html(rows, selected, calendar),
         unsafe_allow_html=True,
     )
     st.caption(
@@ -992,12 +1145,33 @@ def render_macro_trends() -> None:
         "Click an asset — its name, or “View news” — to open its own page with its news and, for indices, the share of its constituents near a 52-week high or low. "
         "That breadth read does not apply to crypto or forex: they have no constituent list. "
         "Each news item shows a small thumbnail: the image from the news feed where the feed supplies one, otherwise the publisher's favicon. "
+        "Red-folder news is the Forex Factory high-impact calendar for the next 7 days, in UK time — only High-impact events, in a short list under each group and in full on each asset's own page. If the calendar feed is down, that section says so instead of guessing. "
         "The BofA Bull & Bear score is proprietary and not available in this desk; the breadth + trend read is the desk's own equivalent."
     )
 
 
-def _render_macro_asset(label: str, rows: list[dict]) -> None:
-    """One macro asset on its own: its trends, its news, and — for indices — its breadth."""
+def _render_red_folder_section(label: str, calendar: dict | None) -> None:
+    """Full 1-week red-folder list for one macro asset (detail view)."""
+    currencies = MACRO_EVENT_CURRENCIES.get(label, ())
+    st.markdown("**Red-folder news — next 7 days (UK time)**")
+    if label in ("BTCUSD", "ETHUSD"):
+        st.caption(
+            "Crypto has no central-bank calendar of its own, so this shows "
+            "US high-impact events — the main macro driver for crypto."
+        )
+    available = bool(calendar.get("available")) if isinstance(calendar, dict) else False
+    partial = bool(calendar.get("partial")) if isinstance(calendar, dict) else False
+    st.markdown(
+        MACRO_CSS
+        + _red_folder_html(
+            _events_for(calendar, currencies), available, partial, limit=20
+        ),
+        unsafe_allow_html=True,
+    )
+
+
+def _render_macro_asset(label: str, rows: list[dict], calendar: dict | None = None) -> None:
+    """One macro asset on its own: its trends, its news, and — for indices — its breadth, plus its full 1-week red-folder list."""
     if st.button("← Back to all macro trends", key="macro_back"):
         st.query_params.clear()
         st.rerun()
@@ -1005,6 +1179,7 @@ def _render_macro_asset(label: str, rows: list[dict]) -> None:
     st.markdown(f"### {label}")
     if row is None or not row.get("available"):
         st.caption("Trend and news could not be loaded for this asset.")
+        _render_red_folder_section(label, calendar)
         return
     daily = trend_text(row.get("daily"))
     weekly = trend_text(row.get("weekly"))
@@ -1015,6 +1190,7 @@ def _render_macro_asset(label: str, rows: list[dict]) -> None:
     st.markdown("**News**")
     news = row.get("news") if isinstance(row.get("news"), list) else []
     st.markdown(MACRO_CSS + _news_html(news, limit=5), unsafe_allow_html=True)
+    _render_red_folder_section(label, calendar)
     st.markdown("**Breadth — new highs vs new lows**")
     if label in BREADTH_SOURCES:
         _render_breadth(label)
