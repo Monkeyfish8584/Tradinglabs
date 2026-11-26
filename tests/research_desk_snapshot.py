@@ -22,7 +22,10 @@ from research_desk_page import (
     MACRO_INDICES,
     MACRO_THEME_CSS,
     TREND_EMA_PERIOD,
+    _link_with_theme,
     _macro_css,
+    _normalize_theme,
+    _theme_query_value,
     affected_indices,
     breadth_summary,
     calendar_days,
@@ -177,6 +180,40 @@ def test_macro_theme_has_explicit_light_and_dark_palettes() -> None:
     assert _macro_css("Light").endswith(light)
     assert _macro_css("Dark").endswith(dark)
     assert _macro_css() == _macro_css("Light")
+
+
+def test_macro_theme_persists_across_pages() -> None:
+    # Regression test for 2026-11-26: the theme reset to Light on every
+    # page change (e.g. clicking a stock to its placeholder page). The
+    # choice lived only in session state, but stock/index links are plain
+    # <a href="?stock=..."> / "?index=..." anchors — a full browser
+    # reload that starts a new Streamlit session, losing session state.
+    # The fix carries the theme in the URL as theme=dark|light, the
+    # Streamlit equivalent of the preview fix.
+    assert _normalize_theme("dark") == "Dark"
+    assert _normalize_theme("Dark") == "Dark"
+    assert _normalize_theme("LIGHT") == "Light"
+    assert _normalize_theme("banana") is None
+    assert _normalize_theme(None) is None
+    assert _normalize_theme(["dark"]) == "Dark"
+    assert _theme_query_value("Dark") == "dark"
+    assert _theme_query_value("Light") == "light"
+    assert _theme_query_value(None) == "light"
+    # Outside a Streamlit run the current theme is Light, so links carry it.
+    assert _link_with_theme("index=dax") == "?index=dax&theme=light"
+    assert _link_with_theme("stock=SAP") == "?stock=SAP&theme=light"
+    page = (ROOT / "research_desk_page.py").read_text(encoding="utf-8")
+    # The desk reads the theme from the URL and syncs it at the top of
+    # render_macro_desk, and every navigation link carries it.
+    assert "_sync_theme()" in page
+    assert "_theme_from_query_params" in page
+    assert "_link_with_theme(f\"index={item['id']}\")" in page
+    assert "_link_with_theme(\"stock=\" + urllib.parse.quote(ticker))" in page
+    # Back buttons keep the theme instead of wiping the query params:
+    # no live st.query_params.clear() call remains (only a docstring
+    # mention of why it is not used).
+    assert "\n        st.query_params.clear()" not in page
+    assert "_clear_macro_route()" in page
 
 
 def test_parse_headlines_caps_at_five_and_truncates_titles() -> None:
