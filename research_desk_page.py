@@ -229,9 +229,10 @@ MACRO_CSS = """
 .md-bull { background: rgba(21,128,61,0.12); color: #15803d; }
 .md-bear { background: rgba(180,35,24,0.12); color: #b42318; }
 .md-missing { background: rgba(128,128,128,0.15); color: #666; }
-.md-gauge-label { font-size: 0.78rem; color: #666; }
-.md-gauge-num { font-family: 'DM Mono', monospace; font-weight: 500; }
-.md-gauge-track { height: 6px; border-radius: 3px; background: rgba(128,128,128,0.25); margin: 0.2rem 0 0.45rem; overflow: hidden; }
+.md-gauges { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px; margin-top: 0.35rem; }
+.md-gauge-label { display: block; font-size: 0.68rem; color: #666; line-height: 1.2; }
+.md-gauge-num { display: block; font-family: 'DM Mono', monospace; font-weight: 500; font-size: 0.72rem; line-height: 1.2; white-space: nowrap; }
+.md-gauge-track { height: 5px; border-radius: 3px; background: rgba(128,128,128,0.25); margin: 0.15rem 0 0; overflow: hidden; }
 .md-gauge-fill { height: 100%; border-radius: 3px; }
 .md-hero { border-radius: 12px; padding: 1.1rem 1.2rem; color: #fff; margin-bottom: 0.6rem; position: relative; overflow: hidden; }
 .md-hero h2 { margin: 0; color: #fff; }
@@ -438,6 +439,10 @@ def load_index_data(index_id: str, getter=None) -> dict:
     except QuoteError:
         weekly = []
     try:
+        daily5 = fetch_candles(symbol, interval="1d", span="5y", getter=getter)
+    except QuoteError:
+        daily5 = daily
+    try:
         hourly = fetch_candles(symbol, interval="60m", span="1mo", getter=getter)
         four_hour = _trend_from_candles(_aggregate_4h(hourly))
     except QuoteError:
@@ -455,6 +460,8 @@ def load_index_data(index_id: str, getter=None) -> dict:
         "four_hour_trend": four_hour,
         "closes60": closes60,
         "dates60": dates60,
+        "closes5y": [c["close"] for c in daily5],
+        "dates5y": [c["date"] for c in daily5],
         "daily_candles": daily,
     }
 
@@ -579,16 +586,40 @@ def cached_constituents(index_id: str) -> dict:
     return {"symbols": constituent_symbols(page, index_id), "names": constituent_names(page, index_id)}
 
 
+def session_extreme(last: dict | None, previous: dict | None) -> tuple[bool, bool]:
+    """Whether this session made a new high or a new low versus the previous one.
+
+    A new high is this session's high above the previous session's high.
+    A new low is this session's low below the previous session's low.
+    A missing price counts as neither. One session can be both.
+    """
+
+    def price(candle: dict | None, key: str) -> float | None:
+        if not isinstance(candle, dict):
+            return None
+        value = candle.get(key)
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return None
+        return float(value)
+
+    last_high, prev_high = price(last, "high"), price(previous, "high")
+    last_low, prev_low = price(last, "low"), price(previous, "low")
+    new_high = last_high is not None and prev_high is not None and last_high > prev_high
+    new_low = last_low is not None and prev_low is not None and last_low < prev_low
+    return new_high, new_low
+
+
 def breadth_summary(index_id: str, per_symbol: list[dict | None]) -> dict:
-    """Above-50MA and new-high counts, per the spec's definitions.
+    """Above-50MA, new-high and new-low counts.
 
     ``per_symbol`` is one entry per constituent: {"above50": bool|None,
-    "new_high": bool|None} or None when that constituent published no
-    usable closes. Missing constituents stay out of both counts.
+    "new_high": bool|None, "new_low": bool|None} or None when that
+    constituent published no usable closes. Missing constituents stay
+    out of the counts.
     """
-    above = highs = measured = unknown = 0
+    above = highs = lows = measured = unknown = 0
     for item in per_symbol:
-        if not item or item.get("above50") is None and item.get("new_high") is None:
+        if not item or item.get("above50") is None and item.get("new_high") is None and item.get("new_low") is None:
             unknown += 1
             continue
         measured += 1
@@ -596,21 +627,32 @@ def breadth_summary(index_id: str, per_symbol: list[dict | None]) -> dict:
             above += 1
         if item.get("new_high"):
             highs += 1
+        if item.get("new_low"):
+            lows += 1
     listed = len(per_symbol)
     ready = listed > 0 and measured > 0 and measured * 2 >= listed
-    return {"index_id": index_id, "listed": listed, "measured": measured, "unknown": unknown, "above50": above, "new_highs": highs, "ready": ready}
+    return {
+        "index_id": index_id,
+        "listed": listed,
+        "measured": measured,
+        "unknown": unknown,
+        "above50": above,
+        "new_highs": highs,
+        "new_lows": lows,
+        "ready": ready,
+    }
 
 
 def load_macro_breadth(index_id: str, getter=None) -> dict:
-    """Breadth for one index: above 50MA and new highs vs previous day.
+    """Breadth for one index: above 50MA, new highs and new lows vs the previous day.
 
     Each constituent needs at least 51 daily closes for its 50-day SMA
-    and the last two sessions' highs for the new-high read. A constituent
-    that does not publish them is left out, never counted as either.
+    and the last two sessions' highs and lows. A constituent that does
+    not publish them is left out of the counts.
     """
     symbols = cached_constituents(index_id).get("symbols") or []
     if not symbols:
-        return {"index_id": index_id, "listed": 0, "measured": 0, "unknown": 0, "above50": 0, "new_highs": 0, "ready": False, "top": []}
+        return {"index_id": index_id, "listed": 0, "measured": 0, "unknown": 0, "above50": 0, "new_highs": 0, "new_lows": 0, "ready": False, "top": []}
     get = getter or fetch_text
 
     def one(symbol: str) -> dict | None:
@@ -618,17 +660,18 @@ def load_macro_breadth(index_id: str, getter=None) -> dict:
             candles = fetch_candles(symbol, interval="1d", span="6mo", getter=get)
         except Exception:
             return None
-        closes = [float(c["close"]) for c in candles if isinstance(c.get("close"), (int, float))]
+        closes = [float(c["close"]) for c in candles if isinstance(c.get("close"), (int, float)) and not isinstance(c.get("close"), bool)]
         if len(closes) < BREADTH_SMA_PERIOD + 1 or len(candles) < 2:
             return None
         average = sma(closes, BREADTH_SMA_PERIOD)
         if average is None:
             return None
-        last, previous = candles[-1], candles[-2]
+        new_high, new_low = session_extreme(candles[-1], candles[-2])
         return {
             "symbol": symbol,
             "above50": closes[-1] > average,
-            "new_high": bool(isinstance(last.get("high"), (int, float)) and isinstance(previous.get("high"), (int, float)) and float(last["high"]) > float(previous["high"])),
+            "new_high": new_high,
+            "new_low": new_low,
         }
 
     if getter is None and len(symbols) > 1:
@@ -642,7 +685,7 @@ def load_macro_breadth(index_id: str, getter=None) -> dict:
     for position, item in enumerate(per_symbol[:8]):
         if item is None:
             continue
-        top.append({"name": names[position] if position < len(names) else item["symbol"], "symbol": item["symbol"], "above50": item["above50"], "new_high": item["new_high"]})
+        top.append({"name": names[position] if position < len(names) else item["symbol"], "symbol": item["symbol"], "above50": item["above50"], "new_high": item["new_high"], "new_low": item["new_low"]})
     summary["top"] = top
     return summary
 
@@ -790,6 +833,18 @@ def render_red_folder_list(calendar: dict | None, index_id: str) -> None:
 # Top index strip (spec 3.1) and index pages (spec 3.3)
 # ---------------------------------------------------------------------------
 
+def _breadth_gauge(label: str, count: str, pct: float, colour: str, title: str) -> str:
+    """One thin breadth gauge: label, count and a bar. A positive count keeps a visible sliver."""
+    width = 0.0 if pct <= 0 else max(pct, 3.0)
+    return (
+        f'<div class="md-gauge" title="{html.escape(title)}">'
+        f'<span class="md-gauge-label">{html.escape(label)}</span>'
+        f'<span class="md-gauge-num">{html.escape(count)}</span>'
+        f'<div class="md-gauge-track"><div class="md-gauge-fill" style="width:{width:.0f}%;background:{colour}"></div></div>'
+        f"</div>"
+    )
+
+
 def _strip_card(item: dict, data: dict, active: bool) -> str:
     label = item["label"]
     if not data.get("available"):
@@ -806,16 +861,17 @@ def _strip_card(item: dict, data: dict, active: bool) -> str:
             listed = int(breadth.get("listed") or 0)
             above = int(breadth.get("above50") or 0)
             highs = int(breadth.get("new_highs") or 0)
+            lows = int(breadth.get("new_lows") or 0)
             above_pct = (above / listed * 100) if listed else 0
             high_pct = (highs / listed * 100) if listed else 0
+            low_pct = (lows / listed * 100) if listed else 0
             above_colour = "#15803d" if above_pct >= 50 else "#b42318"
             gauges = (
-                f'<div><span class="md-gauge-label" title="Constituents whose latest close is above their 50-day moving average">50MA</span> '
-                f'<span class="md-gauge-num" style="float:right">{above}/{listed}</span></div>'
-                f'<div class="md-gauge-track"><div class="md-gauge-fill" style="width:{above_pct:.0f}%;background:{above_colour}"></div></div>'
-                f'<div><span class="md-gauge-label" title="Constituents whose current session high exceeds the previous session high">Highs</span> '
-                f'<span class="md-gauge-num" style="float:right">{highs}/{listed}</span></div>'
-                f'<div class="md-gauge-track"><div class="md-gauge-fill" style="width:{high_pct:.0f}%;background:#2563eb"></div></div>'
+                '<div class="md-gauges">'
+                + _breadth_gauge("50MA", f"{above}/{listed}", above_pct, above_colour, "Constituents above their 50-day moving average")
+                + _breadth_gauge("Highs", f"{highs}/{listed}", high_pct, "#2563eb", "Constituents making a new high vs the previous day")
+                + _breadth_gauge("Lows", f"{lows}/{listed}", low_pct, "#b42318", "Constituents making a new low vs the previous day")
+                + "</div>"
             )
         else:
             gauges = '<div class="md-gauge-label">Breadth unavailable — not enough constituent quotes published.</div>'
@@ -1032,8 +1088,90 @@ def _render_seasonality(item: dict) -> None:
     st.caption(f"{partial} {years[0]} is partial. Later months are blank. A blank cell means that close was not published.")
 
 
+PRICE_RANGES = (("1M", 1), ("6M", 6), ("1Y", 12), ("3Y", 36))
+CHART_HEIGHT = 340
+
+
+def _yes_no(value: bool | None) -> str:
+    """Plain Yes or No for the breadth table (never a dot)."""
+    return "Yes" if value else "No"
+
+
+def build_price_figure(dates: list, closes: list, theme: str = "Light", height: int = CHART_HEIGHT):
+    """Five-year price line: fixed height, fixed-size end dot, range buttons.
+
+    The line and dot sizes are in pixels, so they stay the same when the
+    chart is zoomed. Scroll zooms the date axis, dragging pans it, and the
+    1M / 6M / 1Y / 3Y / 5Y buttons jump to a range. Opens on one year.
+    Returns None when there is nothing to draw.
+    """
+    import plotly.graph_objects as go
+
+    pairs = []
+    for when, close in zip(dates, closes):
+        stamp = pd.to_datetime(when, errors="coerce")
+        if pd.isna(stamp) or isinstance(close, bool) or not isinstance(close, (int, float)):
+            continue
+        pairs.append((stamp, float(close)))
+    if len(pairs) < 2:
+        return None
+    xs = [p[0] for p in pairs]
+    ys = [p[1] for p in pairs]
+    dark = theme == "Dark"
+    text = "#f1f5f9" if dark else "#111827"
+    grid = "rgba(241,245,249,0.12)" if dark else "rgba(17,24,39,0.10)"
+    card = "#1e293b" if dark else "#ffffff"
+    bull, bear = ("#4ade80", "#f87171") if dark else ("#15803d", "#b42318")
+    year_ago = ys[max(0, len(ys) - 253)]
+    color = bull if ys[-1] >= year_ago else bear
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(x=xs, y=ys, mode="lines", line=dict(color=color, width=2), hovertemplate="%{x|%a %d %b %Y}<br>%{y:,.1f}<extra></extra>", showlegend=False))
+    fig.add_trace(go.Scatter(x=[xs[-1]], y=[ys[-1]], mode="markers", marker=dict(size=9, color=color, line=dict(color=card, width=2)), hoverinfo="skip", showlegend=False))
+    buttons = [dict(count=months, label=label, step="month", stepmode="backward") for label, months in PRICE_RANGES]
+    buttons.append(dict(label="5Y", step="all"))
+    fig.update_layout(
+        height=height,
+        margin=dict(l=8, r=8, t=8, b=8),
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+        font=dict(color=text, family="DM Sans, sans-serif"),
+        dragmode="pan",
+        hovermode="x",
+    )
+    fig.update_xaxes(
+        range=[xs[-1] - pd.DateOffset(years=1), xs[-1]],
+        showgrid=False,
+        rangeselector=dict(buttons=buttons, bgcolor=card, activecolor=grid, font=dict(color=text)),
+    )
+    fig.update_yaxes(side="right", showgrid=True, gridcolor=grid, zeroline=False, tickformat=",.0f", autorange=True, fixedrange=True)
+    return fig
+
+
+def _render_price_chart(info: dict, theme: str) -> None:
+    """Five-year zoomable chart, with the old 60-session line as the fallback."""
+    dates = info.get("dates5y") or []
+    closes = info.get("closes5y") or []
+    fig = None
+    if closes and len(dates) == len(closes):
+        try:
+            fig = build_price_figure(dates, closes, theme)
+        except ImportError:
+            fig = None
+    if fig is not None:
+        st.plotly_chart(fig, use_container_width=True, config={"scrollZoom": True, "displaylogo": False, "modeBarButtonsToRemove": ["select2d", "lasso2d", "autoScale2d"]}, key="macro_price_chart")
+        st.caption("Scroll to zoom, drag to pan, or use the 1M to 5Y buttons. The line and dot stay the same size.")
+        return
+    short = info.get("closes60") or []
+    short_dates = info.get("dates60") or []
+    if short:
+        chart = pd.DataFrame({"Close": short}, index=short_dates if len(short_dates) == len(short) else None)
+        st.line_chart(chart, height=CHART_HEIGHT)
+    else:
+        st.caption("Price chart unavailable — no daily closes were published.")
+
+
 def render_index_page(index_id: str, data: dict, calendar: dict | None) -> None:
-    """One index on one page: hero, 60-session chart, news, breadth, red folder."""
+    """One index on one page: hero, 5-year chart, sentiment and posts, seasonality, then news beside breadth. The red folder calendar stays at the top only."""
     item = INDEX_BY_ID[index_id]
     info = data.get(index_id) or {}
     if st.button("← Back to Macro Desk", key="macro_index_back"):
@@ -1052,59 +1190,64 @@ def render_index_page(index_id: str, data: dict, calendar: dict | None) -> None:
         f'<div class="md-skyline" aria-hidden="true">▂▃▄▅▆▇█▇▆▅▄▃▂</div></div>',
         unsafe_allow_html=True,
     )
-    closes = info.get("closes60") or []
-    dates = info.get("dates60") or []
-    st.markdown("**Price — 60 sessions**")
-    if closes:
-        chart = pd.DataFrame({"Close": closes}, index=dates if len(dates) == len(closes) else None)
-        st.line_chart(chart, height=220)
-    else:
-        st.caption("Price chart unavailable — no daily closes were published.")
+    st.markdown("**Price — 5 years**")
+    _render_price_chart(info, _current_theme())
     st.markdown(
         '<div class="md-pills">' + _pill("Weekly", info.get("weekly_trend")) + _pill("Daily", info.get("daily_trend")) + _pill("4H", info.get("four_hour_trend")) + "</div>",
         unsafe_allow_html=True,
     )
     st.caption("Trend: Bullish if the latest close is above the 50-period EMA and the 50 EMA is rising, otherwise Bearish (spec section 4).")
-    _render_seasonality(item)
     left, right = st.columns(2)
     with left:
         _render_sentiment_card(index_id, item["label"])
     with right:
         _render_social(index_id, item["label"])
-    st.markdown("## Recent news")
-    try:
-        news = fetch_news_rss(f"{item['label']} {item['name']} market news") or []
-    except Exception:
-        news = []
-    if not news:
-        st.caption("News unavailable.")
-    else:
-        st.markdown(_news_html(news), unsafe_allow_html=True)
-        st.caption("Headlines come from the public news feed. A sentiment tag is not shown, because no news-score source is connected.")
-    st.markdown("## Underlying breadth")
-    breadth = info.get("breadth") or {}
-    if not breadth.get("ready"):
-        st.caption("Breadth unavailable — not enough constituent quotes were published to calculate it.")
-    else:
-        listed = int(breadth.get("listed") or 0)
-        above = int(breadth.get("above50") or 0)
-        highs = int(breadth.get("new_highs") or 0)
-        above_pct = (above / listed * 100) if listed else 0
-        high_pct = (highs / listed * 100) if listed else 0
-        st.markdown(f"Above 50-day MA <span class='md-breadth-num' style='float:right'>{above} / {listed}</span>", unsafe_allow_html=True)
-        st.markdown(f'<div class="md-gauge-track" style="height:10px"><div class="md-gauge-fill" style="width:{above_pct:.0f}%;background:#2563eb"></div></div>', unsafe_allow_html=True)
-        st.markdown(f"New highs vs previous day <span class='md-breadth-num' style='float:right'>{highs} / {listed}</span>", unsafe_allow_html=True)
-        st.markdown(f'<div class="md-gauge-track" style="height:10px"><div class="md-gauge-fill" style="width:{high_pct:.0f}%;background:#15803d"></div></div>', unsafe_allow_html=True)
-        st.caption(f"Coverage: {breadth.get('measured')} of {listed} listed constituents measured. A constituent with no usable closes is left out of both counts.")
-        top = breadth.get("top") or []
-        if top:
-            st.markdown("**Top weights**")
-            st.caption("First constituents as listed by the source — index weights are not published by this source, so this is source order, not a weight ranking.")
-            rows = []
-            for entry in top:
-                rows.append({"Constituent": entry.get("name") or entry.get("symbol"), ">50MA": "●" if entry.get("above50") else "○", "New high": "●" if entry.get("new_high") else "○"})
-            st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
-    render_red_folder_list(calendar, index_id)
+    _render_seasonality(item)
+    news_col, breadth_col = st.columns(2)
+    with news_col:
+        st.markdown("## Recent news")
+        try:
+            news = fetch_news_rss(f"{item['label']} {item['name']} market news") or []
+        except Exception:
+            news = []
+        if not news:
+            st.caption("News unavailable.")
+        else:
+            st.markdown(_news_html(news), unsafe_allow_html=True)
+            st.caption("Headlines come from the public news feed. A sentiment tag is not shown, because no news-score source is connected.")
+    with breadth_col:
+        st.markdown("## Underlying breadth")
+        breadth = info.get("breadth") or {}
+        if not breadth.get("ready"):
+            st.caption("Breadth unavailable — not enough constituent quotes were published to calculate it.")
+        else:
+            listed = int(breadth.get("listed") or 0)
+            above = int(breadth.get("above50") or 0)
+            highs = int(breadth.get("new_highs") or 0)
+            lows = int(breadth.get("new_lows") or 0)
+            above_pct = (above / listed * 100) if listed else 0
+            high_pct = (highs / listed * 100) if listed else 0
+            low_pct = (lows / listed * 100) if listed else 0
+            st.markdown(f"Above 50-day MA <span class='md-breadth-num' style='float:right'>{above} / {listed}</span>", unsafe_allow_html=True)
+            st.markdown(f'<div class="md-gauge-track" style="height:10px"><div class="md-gauge-fill" style="width:{above_pct:.0f}%;background:#2563eb"></div></div>', unsafe_allow_html=True)
+            st.markdown(f"New highs vs previous day <span class='md-breadth-num' style='float:right'>{highs} / {listed}</span>", unsafe_allow_html=True)
+            st.markdown(f'<div class="md-gauge-track" style="height:10px"><div class="md-gauge-fill" style="width:{high_pct:.0f}%;background:#15803d"></div></div>', unsafe_allow_html=True)
+            st.markdown(f"New lows vs previous day <span class='md-breadth-num' style='float:right'>{lows} / {listed}</span>", unsafe_allow_html=True)
+            st.markdown(f'<div class="md-gauge-track" style="height:10px"><div class="md-gauge-fill" style="width:{low_pct:.0f}%;background:#b42318"></div></div>', unsafe_allow_html=True)
+            st.caption(f"Coverage: {breadth.get('measured')} of {listed} listed constituents measured. A constituent with no usable closes is left out of the counts.")
+            top = breadth.get("top") or []
+            if top:
+                st.markdown("**Top weights**")
+                st.caption("First constituents as listed by the source — index weights are not published by this source, so this is source order, not a weight ranking.")
+                rows = []
+                for entry in top:
+                    rows.append({
+                        "Constituent": entry.get("name") or entry.get("symbol"),
+                        ">50MA?": _yes_no(entry.get("above50")),
+                        "New high?": _yes_no(entry.get("new_high")),
+                        "New low?": _yes_no(entry.get("new_low")),
+                    })
+                st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
 
 
 # ---------------------------------------------------------------------------
@@ -1182,6 +1325,30 @@ def _currency_symbol(currency: str | None) -> str:
     return {"USD": "$", "EUR": "€", "GBP": "£"}.get(currency or "", "$")
 
 
+try:
+    from streamlit_searchbox import st_searchbox
+except Exception:  # the plain search box below is the fallback
+    st_searchbox = None
+
+
+def _suggest_symbols(query: str) -> list[tuple[str, str]]:
+    """Suggestions for the one search box: (label shown, ticker returned)."""
+    text = (query or "").strip()
+    if len(text) < 2:
+        return []
+    try:
+        results = search_symbols(text)
+    except Exception:
+        return []
+    options = []
+    for r in results:
+        symbol = str(r.get("symbol") or "").strip()
+        if symbol:
+            name = str(r.get("name") or "").strip()
+            options.append((f"{symbol} — {name}" if name else symbol, symbol))
+    return options[:8]
+
+
 def _run_add_search(query: str) -> None:
     """One box: type a ticker (AAPL) or a company name (NVIDIA) to add it.
 
@@ -1252,18 +1419,31 @@ def _remove_ticker(ticker: str) -> None:
 
 def _render_watchlist() -> None:
     st.markdown("## Watchlist")
-    query = st.text_input("Add a stock — search by ticker or company name", placeholder="NVDA, SAP, Shell…", key="macro_add_search")
-    if st.button("Search", key="macro_add_search_button"):
-        _run_add_search(query)
-    results = st.session_state.get("macro_search_results") or []
-    if results:
-        options = [f"{r.get('symbol')} — {r.get('name')}" for r in results if r.get("symbol")]
-        if options:
-            chosen = st.selectbox("Search results", options=options, key="macro_add_search_results")
-            if st.button("Add selected", key="macro_add_search_add"):
-                _add_ticker(str(chosen).split(" — ")[0])
-    elif st.session_state.get("macro_search_results") is not None:
-        st.caption("No companies matched that search.")
+    if st_searchbox is not None:
+        picked = st_searchbox(
+            _suggest_symbols,
+            placeholder="Add a stock — start typing a name or ticker, e.g. Nvid",
+            key="macro_add_box",
+            clear_on_submit=True,
+        )
+        if picked and picked != st.session_state.get("macro_last_picked"):
+            st.session_state.macro_last_picked = picked
+            _add_ticker(str(picked))
+        elif not picked:
+            st.session_state.macro_last_picked = None
+    else:
+        query = st.text_input("Add a stock — search by ticker or company name", placeholder="NVDA, SAP, Shell…", key="macro_add_search")
+        if st.button("Search", key="macro_add_search_button"):
+            _run_add_search(query)
+        results = st.session_state.get("macro_search_results") or []
+        if results:
+            options = [f"{r.get('symbol')} — {r.get('name')}" for r in results if r.get("symbol")]
+            if options:
+                chosen = st.selectbox("Search results", options=options, key="macro_add_search_results")
+                if st.button("Add selected", key="macro_add_search_add"):
+                    _add_ticker(str(chosen).split(" — ")[0])
+        elif st.session_state.get("macro_search_results") is not None:
+            st.caption("No companies matched that search.")
     added = st.session_state.get("macro_added") or {}
     if not added:
         st.caption("Your watchlist is empty – search above to add a stock.")

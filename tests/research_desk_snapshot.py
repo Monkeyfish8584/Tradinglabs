@@ -28,6 +28,8 @@ from research_desk_page import (
     _theme_query_value,
     affected_indices,
     breadth_summary,
+    session_extreme,
+    _strip_card,
     calendar_days,
     constituent_symbols,
     event_notes,
@@ -82,11 +84,51 @@ def test_breadth_summary_counts_per_spec() -> None:
     summary = breadth_summary("dax", per_symbol)
     assert summary["above50"] == 2
     assert summary["new_highs"] == 1
+    assert summary["new_lows"] == 0
     assert summary["measured"] == 3
     assert summary["unknown"] == 2
     assert summary["listed"] == 5
     assert summary["ready"] is True
     assert breadth_summary("dax", [None, None])["ready"] is False
+    outside = [
+        {"above50": True, "new_high": True, "new_low": False},
+        {"above50": False, "new_high": False, "new_low": True},
+        {"above50": True, "new_high": True, "new_low": True},
+    ]
+    both = breadth_summary("spx", outside)
+    assert both["new_highs"] == 2
+    assert both["new_lows"] == 2
+    assert both["above50"] == 2
+
+
+def test_session_extreme_compares_the_previous_session() -> None:
+    new_high, new_low = session_extreme({"high": 10, "low": 8}, {"high": 9, "low": 7})
+    assert new_high is True and new_low is False
+    new_high, new_low = session_extreme({"high": 9, "low": 6}, {"high": 9, "low": 7})
+    assert new_high is False and new_low is True
+    new_high, new_low = session_extreme({"high": 11, "low": 5}, {"high": 10, "low": 6})
+    assert new_high is True and new_low is True
+    new_high, new_low = session_extreme({"high": None, "low": 4}, {"high": 8, "low": 5})
+    assert new_high is False and new_low is True
+    assert session_extreme(None, {"high": 1, "low": 1}) == (False, False)
+
+
+def test_strip_card_shows_the_lows_gauge() -> None:
+    item = next(entry for entry in MACRO_INDICES if entry["id"] == "dax")
+    data = {
+        "available": True,
+        "change_pct": 0.42,
+        "weekly_trend": "Bullish",
+        "daily_trend": "Bullish",
+        "four_hour_trend": "Bearish",
+        "breadth": {"ready": True, "listed": 40, "above50": 27, "new_highs": 9, "new_lows": 3},
+    }
+    card = _strip_card(item, data, False)
+    assert "Lows" in card
+    assert "3/40" in card
+    assert "9/40" in card
+    assert "27/40" in card
+    assert "new low vs the previous day" in card
 
 
 def test_event_index_mapping_per_spec() -> None:
@@ -456,11 +498,58 @@ def test_form4_amendment_replaces_the_original_rows() -> None:
     assert summary["net_value"] == -40
 
 
+def test_price_figure_is_fixed_size_with_range_buttons() -> None:
+    import research_desk_page as page
+
+    dates = [(date(2021, 11, 26) + timedelta(days=i)).isoformat() for i in range(1300)]
+    closes = [100.0 + i * 0.1 for i in range(1300)]
+    fig = page.build_price_figure(dates, closes, "Light")
+    assert fig.layout.height == page.CHART_HEIGHT == 340
+    assert fig.data[1].marker.size == 9 and len(fig.data[1].x) == 1
+    labels = [b.label for b in fig.layout.xaxis.rangeselector.buttons]
+    assert labels == ["1M", "6M", "1Y", "3Y", "5Y"]
+    start, end = fig.layout.xaxis.range
+    assert 360 <= (end - start).days <= 370
+    assert page.build_price_figure(dates[:1], closes[:1], "Light") is None
+    assert page.build_price_figure(dates, [None] * 1300, "Dark") is None
+
+
+def test_breadth_table_says_yes_or_no_and_index_page_has_no_red_folder_list() -> None:
+    import inspect
+    import research_desk_page as page
+
+    assert page._yes_no(True) == "Yes" and page._yes_no(False) == "No" and page._yes_no(None) == "No"
+    body = inspect.getsource(page.render_index_page)
+    assert "\u25cf" not in body and "\u25cb" not in body
+    assert "render_red_folder_list" not in body
+    assert "news_col, breadth_col = st.columns" in body
+
+
+def test_one_search_box_suggests_symbols_as_you_type() -> None:
+    import research_desk_page as page
+
+    original = page.search_symbols
+    try:
+        page.search_symbols = lambda q, getter=None: [{"symbol": "NVDA", "name": "NVIDIA Corporation"}, {"symbol": "", "name": "skip"}]
+        assert page._suggest_symbols("Nvid") == [("NVDA \u2014 NVIDIA Corporation", "NVDA")]
+        assert page._suggest_symbols("N") == []
+
+        def boom(q, getter=None):
+            raise RuntimeError("down")
+
+        page.search_symbols = boom
+        assert page._suggest_symbols("Nvid") == []
+    finally:
+        page.search_symbols = original
+
+
 if __name__ == "__main__":
     test_macro_indices_are_five_in_spec_order()
     test_ema_trend_bullish_when_above_rising_ema()
     test_weekly_closes_group_by_iso_week()
     test_breadth_summary_counts_per_spec()
+    test_session_extreme_compares_the_previous_session()
+    test_strip_card_shows_the_lows_gauge()
     test_event_index_mapping_per_spec()
     test_calendar_days_is_seven_with_weekends()
     test_red_folder_events_are_high_impact_only()
@@ -481,4 +570,7 @@ if __name__ == "__main__":
     test_form4_keeps_open_market_buys_separate_from_awards()
     test_insider_net_stays_unknown_until_every_trade_has_a_price()
     test_form4_amendment_replaces_the_original_rows()
+    test_price_figure_is_fixed_size_with_range_buttons()
+    test_breadth_table_says_yes_or_no_and_index_page_has_no_red_folder_list()
+    test_one_search_box_suggests_symbols_as_you_type()
     print("Macro Desk checks passed.")
