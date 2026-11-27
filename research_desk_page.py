@@ -481,10 +481,29 @@ def cached_index_data(index_id: str) -> dict:
     return load_index_data(index_id)
 
 
+class _IncompleteCalendar(Exception):
+    """Carries a partial or empty calendar so it is shown but not cached."""
+
+
 @st.cache_data(ttl=3600, show_spinner=False)
+def _red_folder_cached() -> dict:
+    result = fetch_red_folder_events()
+    if not result.get("available") or result.get("partial") or result.get("stale"):
+        raise _IncompleteCalendar(result)
+    return result
+
+
 def cached_red_folder() -> dict:
-    """All high-impact events for the next 7 days, fetched at most hourly."""
-    return fetch_red_folder_events()
+    """All high-impact events for the next 7 days, fetched at most hourly.
+
+    A complete result is cached for an hour. A partial or failed result
+    (for example next week's feed refused) is shown but never cached, so
+    the next page load tries again; the fetch itself rate-limits retries.
+    """
+    try:
+        return _red_folder_cached()
+    except _IncompleteCalendar as exc:
+        return exc.args[0]
 
 
 # --- Constituents and breadth (spec section 4) ---------------------------
@@ -806,7 +825,9 @@ def render_calendar(calendar: dict | None, index_id: str | None = None) -> None:
                     st.session_state.macro_calendar = calendar
                     st.rerun()
     if isinstance(calendar, dict) and calendar.get("partial"):
-        st.caption("Next week's calendar feed was not available, so this list may end before the full 7 days.")
+        st.caption("Next week's calendar feed was not available, so this list may end before the full 7 days. It retries automatically.")
+    elif isinstance(calendar, dict) and calendar.get("stale"):
+        st.caption("Showing the last saved copy of one weekly feed because the latest download failed. Times and numbers may be out of date.")
 
 
 def render_red_folder_list(calendar: dict | None, index_id: str) -> None:

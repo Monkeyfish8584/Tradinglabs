@@ -543,6 +543,56 @@ def test_one_search_box_suggests_symbols_as_you_type() -> None:
         page.search_symbols = original
 
 
+def test_red_folder_falls_back_to_last_good_feed_and_is_not_cached_when_partial() -> None:
+    import json as _json
+    import time as _time
+
+    import research_desk_quotes as q
+
+    now = datetime(2026, 11, 27, 7, 0, tzinfo=timezone.utc)
+    this_week = _json.dumps([{"title": "Inflation Rate YoY Prel", "country": "FR", "date": "2026-11-27T08:45:00+00:00", "impact": "High", "forecast": "3.4%", "previous": "3.4%", "actual": ""}] * 1 + [{"title": "pad", "country": "XX", "date": "2026-11-27T08:45:00+00:00", "impact": "Low"}] * 5)
+    next_week = _json.dumps([{"title": "ISM Manufacturing PMI", "country": "USD", "date": "2026-12-01T10:00:00-05:00", "impact": "High", "forecast": "49.0", "previous": "48.7", "actual": ""}] + [{"title": "pad", "country": "XX", "date": "2026-12-01T10:00:00-05:00", "impact": "Low"}] * 5)
+    urls = q.FF_CALENDAR_URLS
+
+    def only_this(url):
+        if url == urls[0]:
+            return this_week
+        raise RuntimeError("Provider rate limit; try again later")
+
+    partial = q.fetch_red_folder_events(getter=only_this, now=now)
+    assert partial["partial"] is True and len(partial["events"]) == 1
+
+    # live path: a refused next-week feed reuses its last good copy
+    q._FF_STATE.clear()
+    original = q.fetch_text
+    original_sleep = _time.sleep
+    calls = {"n": 0, "fail_next": False}
+
+    def live(url, timeout=16):
+        calls["n"] += 1
+        if url == urls[1] and calls["fail_next"]:
+            raise RuntimeError("Provider rate limit; try again later")
+        return this_week if url == urls[0] else next_week
+
+    try:
+        q.fetch_text = live
+        _time.sleep = lambda s: None
+        first = q.fetch_red_folder_events(now=now)
+        assert first["partial"] is False and first["stale"] is False and len(first["events"]) == 2
+        q._FF_STATE[urls[1]]["ok_at"] -= 10
+        q._FF_STATE[urls[0]]["failed_at"] = 0.0
+        calls["fail_next"] = True
+        second = q.fetch_red_folder_events(now=now)
+        assert second["partial"] is False and second["stale"] is True and len(second["events"]) == 2
+        before = calls["n"]
+        q.fetch_red_folder_events(now=now)
+        assert calls["n"] - before == 1  # the refused feed is not hit again straight away
+    finally:
+        q.fetch_text = original
+        _time.sleep = original_sleep
+        q._FF_STATE.clear()
+
+
 if __name__ == "__main__":
     test_macro_indices_are_five_in_spec_order()
     test_ema_trend_bullish_when_above_rising_ema()
@@ -573,4 +623,5 @@ if __name__ == "__main__":
     test_price_figure_is_fixed_size_with_range_buttons()
     test_breadth_table_says_yes_or_no_and_index_page_has_no_red_folder_list()
     test_one_search_box_suggests_symbols_as_you_type()
+    test_red_folder_falls_back_to_last_good_feed_and_is_not_cached_when_partial()
     print("Macro Desk checks passed.")
