@@ -543,6 +543,118 @@ def test_one_search_box_suggests_symbols_as_you_type() -> None:
         page.search_symbols = original
 
 
+def test_red_folder_falls_back_to_last_good_feed_and_is_not_cached_when_partial() -> None:
+    import json as _json
+    import time as _time
+
+    import research_desk_quotes as q
+
+    now = datetime(2026, 11, 27, 7, 0, tzinfo=timezone.utc)
+    this_week = _json.dumps([{"title": "Inflation Rate YoY Prel", "country": "FR", "date": "2026-11-27T08:45:00+00:00", "impact": "High", "forecast": "3.4%", "previous": "3.4%", "actual": ""}] * 1 + [{"title": "pad", "country": "XX", "date": "2026-11-27T08:45:00+00:00", "impact": "Low"}] * 5)
+    next_week = _json.dumps([{"title": "ISM Manufacturing PMI", "country": "USD", "date": "2026-12-01T10:00:00-05:00", "impact": "High", "forecast": "49.0", "previous": "48.7", "actual": ""}] + [{"title": "pad", "country": "XX", "date": "2026-12-01T10:00:00-05:00", "impact": "Low"}] * 5)
+    urls = q.FF_CALENDAR_URLS
+
+    def only_this(url):
+        if url == urls[0]:
+            return this_week
+        raise RuntimeError("Provider rate limit; try again later")
+
+    partial = q.fetch_red_folder_events(getter=only_this, now=now)
+    assert partial["partial"] is True and len(partial["events"]) == 1
+
+    # live path: a refused next-week feed reuses its last good copy
+    q._FF_STATE.clear()
+    original = q.fetch_text
+    original_sleep = _time.sleep
+    calls = {"n": 0, "fail_next": False}
+
+    def live(url, timeout=16):
+        calls["n"] += 1
+        if url == urls[1] and calls["fail_next"]:
+            raise RuntimeError("Provider rate limit; try again later")
+        return this_week if url == urls[0] else next_week
+
+    try:
+        q.fetch_text = live
+        _time.sleep = lambda s: None
+        first = q.fetch_red_folder_events(now=now)
+        assert first["partial"] is False and first["stale"] is False and len(first["events"]) == 2
+        q._FF_STATE[urls[1]]["ok_at"] -= 10
+        q._FF_STATE[urls[0]]["failed_at"] = 0.0
+        calls["fail_next"] = True
+        second = q.fetch_red_folder_events(now=now)
+        assert second["partial"] is False and second["stale"] is True and len(second["events"]) == 2
+        before = calls["n"]
+        q.fetch_red_folder_events(now=now)
+        assert calls["n"] - before == 1  # the refused feed is not hit again straight away
+    finally:
+        q.fetch_text = original
+        _time.sleep = original_sleep
+        q._FF_STATE.clear()
+
+
+def test_seasonality_figure_bridges_gaps_and_counts_months_beating_average() -> None:
+    import research_desk_page as page
+
+    labels = ["01-01", "01-02", "01-03", "01-04"]
+    report = {
+        "years": [2026, 2025, 2024],
+        "labels": labels,
+        "chart": {"2026": [0.0, None, 2.0, 3.0], "2025": [0.0, 1.0, None, 5.0], "2024": [0.0, 1.0, 2.0, 4.0]},
+        "monthly": {"2026": [3.0, -1.0, None], "2025": [1.0, 2.0, 1.0], "2024": [1.0, 0.0, 1.0]},
+        "average": [1.0, 1.0, 1.0],
+        "average_label": "Avg 2024\u20132025",
+    }
+    fig = page.build_seasonality_figure(report, "Light")
+    lines = [trace for trace in fig.data if trace.mode == "lines"]
+    assert len(lines) == 3 and all(trace.connectgaps for trace in lines)
+    assert lines[0].line.width > lines[1].line.width
+    assert page.months_beating_average(report) == (1, 2)
+    assert page.months_beating_average({"years": [], "monthly": {}, "average": []}) is None
+    assert page.build_seasonality_figure({"years": [2026], "labels": [], "chart": {}}, "Dark") is None
+
+
+def test_free_feed_sentiment_scores_headlines_and_hides_x() -> None:
+    import json as _json
+    import research_desk_page as page
+    from macro_desk_insights import auto_sentiment_view, fetch_reddit_posts, score_text, score_texts, tone_of
+
+    assert score_text("Shares surge as profits beat estimates") > 0.5
+    assert score_text("Stock plunges after profit warning") < -0.5
+    assert score_text("Results did not beat estimates") < 0
+    assert score_text("Company holds annual meeting") == 0.0
+    assert tone_of(0.5) == "bullish" and tone_of(-0.5) == "bearish" and tone_of(0.0) == "neutral" and tone_of(None) == "neutral"
+    assert score_texts([]) == {"score": None, "count": 0}
+    assert score_texts(["Shares surge", "Stock plunges"])["score"] == 0.0
+
+    today = date(2026, 11, 27)
+    history = {(today - timedelta(days=o)).isoformat(): {"news": 10.0 + o, "news_n": 5, "social": None, "social_n": 0} for o in list(range(1, 3)) + list(range(7, 10))}
+    view = auto_sentiment_view(history, today, {"news": 80.0, "news_n": 5, "social": 20.0, "social_n": 4})
+    assert view["score"] == 0.6 * 80.0 + 0.4 * 20.0 and view["low_volume"] is False
+    assert view["change"] is not None and view["label"] == "Improving"
+    thin = auto_sentiment_view({}, today, {"news": 40.0, "news_n": 2, "social": None, "social_n": 0})
+    assert thin["score"] is None
+
+    assert fetch_reddit_posts("NVDA", None, None) == {"configured": False, "available": False, "posts": []}
+    calls = []
+
+    def fake(url, headers=None, data=None, timeout=16):
+        calls.append(url)
+        if "access_token" in url:
+            return _json.dumps({"access_token": "tok"})
+        return _json.dumps({"data": {"children": [{"data": {"title": "NVDA rally continues", "selftext": "", "author": "bob", "subreddit": "stocks", "permalink": "/r/stocks/1"}}, {"data": {"title": "", "author": "x"}}]}})
+
+    got = fetch_reddit_posts("NVDA", "id", "secret", http=fake)
+    assert got["available"] and len(got["posts"]) == 1 and got["posts"][0]["author"] == "u/bob"
+    assert got["posts"][0]["link"] == "https://www.reddit.com/r/stocks/1" and len(calls) == 2
+
+    def broken(url, headers=None, data=None, timeout=16):
+        raise OSError("down")
+
+    assert fetch_reddit_posts("NVDA", "id", "secret", http=broken)["available"] is False
+    assert page.SHOW_X_SENTIMENT is False
+
+
 if __name__ == "__main__":
     test_macro_indices_are_five_in_spec_order()
     test_ema_trend_bullish_when_above_rising_ema()
@@ -573,4 +685,7 @@ if __name__ == "__main__":
     test_price_figure_is_fixed_size_with_range_buttons()
     test_breadth_table_says_yes_or_no_and_index_page_has_no_red_folder_list()
     test_one_search_box_suggests_symbols_as_you_type()
+    test_red_folder_falls_back_to_last_good_feed_and_is_not_cached_when_partial()
+    test_seasonality_figure_bridges_gaps_and_counts_months_beating_average()
+    test_free_feed_sentiment_scores_headlines_and_hides_x()
     print("Macro Desk checks passed.")

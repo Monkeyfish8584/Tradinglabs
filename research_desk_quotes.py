@@ -668,6 +668,45 @@ def parse_ff_calendar(payload: object) -> list[dict]:
     return events
 
 
+# Last good copy of each weekly feed, and when a failed download may be
+# retried. The feed allows only a few downloads per few minutes and many
+# apps share one IP on a host like Streamlit Cloud, so the second (next
+# week) download is the one most likely to be refused. A refused feed
+# falls back to its last good copy instead of leaving next week blank,
+# and is not hit again for FF_RETRY_SECONDS. Only used for live fetches
+# (no injected getter), so tests stay independent.
+FF_RETRY_SECONDS = 120
+FF_STALE_SECONDS = 24 * 3600
+_FF_STATE: dict[str, dict] = {}
+
+
+def _read_ff_feed(url: str, getter=None) -> tuple[list[dict] | None, bool]:
+    """(events, was_stale) for one weekly feed, or (None, False) if unreadable."""
+    if getter is not None:
+        try:
+            return parse_ff_calendar(json.loads(getter(url))), False
+        except Exception:
+            return None, False
+    import time
+
+    state = _FF_STATE.setdefault(url, {})
+    now = time.time()
+    if now - state.get("failed_at", 0.0) >= FF_RETRY_SECONDS:
+        for attempt in range(2):
+            try:
+                parsed = parse_ff_calendar(json.loads(fetch_text(url)))
+            except Exception:
+                if attempt == 0:
+                    time.sleep(2)
+                continue
+            state.update({"events": parsed, "ok_at": now, "failed_at": 0.0})
+            return parsed, False
+        state["failed_at"] = now
+    if state.get("events") is not None and now - state.get("ok_at", 0.0) <= FF_STALE_SECONDS:
+        return state["events"], True
+    return None, False
+
+
 def fetch_red_folder_events(
     currencies: tuple[str, ...] | None = None,
     days_ahead: int = 7,
@@ -680,11 +719,11 @@ def fetch_red_folder_events(
     date, each as in :func:`parse_ff_calendar`; ``available`` is False
     when neither calendar feed could be read; ``partial`` is True when
     only one of the two weekly feeds could be read, so the window may
-    end before ``days_ahead``. ``currencies`` limits the result to those
+    end before ``days_ahead``; ``stale`` is True when a feed that failed
+    was replaced by its last good copy. ``currencies`` limits the result to those
     currency codes (``None`` keeps them all). Never raises: a failed
     feed is an honest empty/partial result, not fabricated events.
     """
-    get = getter or fetch_text
     moment = now or datetime.now(timezone.utc)
     if moment.tzinfo is None:
         moment = moment.replace(tzinfo=timezone.utc)
@@ -694,13 +733,14 @@ def fetch_red_folder_events(
     }
     events: list[dict] = []
     feeds_read = 0
+    stale = False
     for url in FF_CALENDAR_URLS:
-        try:
-            payload = json.loads(get(url))
-        except Exception:
+        parsed, was_stale = _read_ff_feed(url, getter)
+        if parsed is None:
             continue
         feeds_read += 1
-        events.extend(parse_ff_calendar(payload))
+        stale = stale or was_stale
+        events.extend(parsed)
     seen: set[tuple[str, str, str]] = set()
     upcoming: list[dict] = []
     for event in sorted(events, key=lambda item: item["date"]):
@@ -717,6 +757,7 @@ def fetch_red_folder_events(
         "events": upcoming,
         "available": feeds_read > 0,
         "partial": 0 < feeds_read < len(FF_CALENDAR_URLS),
+        "stale": stale,
     }
 
 

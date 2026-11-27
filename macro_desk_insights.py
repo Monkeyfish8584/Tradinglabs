@@ -669,3 +669,165 @@ def fetch_bluesky_posts(query: str, getter=None) -> dict:
             continue
         posts.append({"author": handle, "text": body, "tone": "unscored", "created": str(record.get("createdAt") or item.get("indexedAt") or "")})
     return {"available": True, "posts": posts}
+
+
+# --- Free-feed sentiment: news headlines, Bluesky and Reddit posts -------
+# No AI service and no cost. Each headline or post is scored with a small
+# finance keyword list, so the result is rough and says so on the page.
+# Posts and headlines the list does not recognise count as neutral.
+
+BULLISH_WORDS = frozenset(
+    "beat beats surge surges surged soar soars rally rallies rallied gain gains gained rise rises rose jump jumps jumped "
+    "climb climbs record high highs upgrade upgrades upgraded outperform bullish buy buying growth strong stronger strength "
+    "boost boosts lifted lifts raises raised optimism optimistic recover recovery rebound rebounds breakout accelerate "
+    "expands expansion tailwind support supports positive improves improved upbeat winners long calls moon".split()
+)
+BEARISH_WORDS = frozenset(
+    "miss misses fall falls fell drop drops dropped slump slumps slumped plunge plunges plunged tumble tumbles sink sinks "
+    "decline declines declined downgrade downgrades downgraded underperform bearish sell selling selloff weak weaker weakness "
+    "cut cuts slashed warning warns warn fear fears recession crash crashes loss losses lowered concern concerns risk risks "
+    "tariff tariffs probe lawsuit fraud layoffs headwind pressure negative worsens worsened short puts dump".split()
+)
+NEGATIONS = frozenset({"not", "no", "never", "without", "despite", "fails", "failed", "isn't", "wasn't", "won't", "doesn't", "didn't"})
+TONE_BAND = 0.2
+
+
+def score_text(text: str) -> float:
+    """Tone of one headline or post from -1 (bearish) to +1 (bullish).
+
+    Counts keyword hits. A negation word in the two words before a hit
+    flips it. No hits is exactly 0.
+    """
+    words = re.findall(r"[a-z][a-z'&-]*", (text or "").lower())
+    positive = negative = 0
+    for index, word in enumerate(words):
+        if word in BULLISH_WORDS:
+            hit = 1
+        elif word in BEARISH_WORDS:
+            hit = -1
+        else:
+            continue
+        if any(prior in NEGATIONS for prior in words[max(0, index - 2) : index]):
+            hit = -hit
+        if hit > 0:
+            positive += 1
+        else:
+            negative += 1
+    total = positive + negative
+    return 0.0 if total == 0 else (positive - negative) / total
+
+
+def tone_of(score: float | None) -> str:
+    """bullish, bearish or neutral for one item score."""
+    if score is None:
+        return "neutral"
+    if score >= TONE_BAND:
+        return "bullish"
+    if score <= -TONE_BAND:
+        return "bearish"
+    return "neutral"
+
+
+def score_texts(texts: list[str]) -> dict:
+    """Mean tone of several items, scaled to -100..+100, with the item count."""
+    clean = [t for t in texts if isinstance(t, str) and t.strip()]
+    if not clean:
+        return {"score": None, "count": 0}
+    return {"score": sum(score_text(t) for t in clean) / len(clean) * 100, "count": len(clean)}
+
+
+def auto_sentiment_view(history: dict | None, today: date, live: dict | None = None) -> dict:
+    """Today's score, 7-day change and saved series from scored feeds.
+
+    ``history`` maps an ISO date to ``{"news", "news_n", "social", "social_n"}``.
+    ``live`` is today's entry in the same shape and replaces the saved one.
+    A day with too few items is left out, never turned into a number.
+    """
+    stored = dict(history) if isinstance(history, dict) else {}
+    if isinstance(live, dict):
+        stored[today.isoformat()] = live
+    series: list[dict] = []
+    by_day: dict[date, float] = {}
+    scored_today = {"score": None, "low_volume": True, "news": None, "social": None}
+    for key, entry in stored.items():
+        if not isinstance(entry, dict):
+            continue
+        try:
+            day = date.fromisoformat(str(key))
+        except ValueError:
+            continue
+        scored = score_day(entry.get("news"), int(entry.get("news_n") or 0), entry.get("social"), int(entry.get("social_n") or 0))
+        if day == today:
+            scored_today = scored
+        if scored["score"] is None:
+            continue
+        by_day[day] = float(scored["score"])
+        series.append({"date": day.isoformat(), "combined": scored["score"], "news": scored["news"], "social": scored["social"]})
+    series.sort(key=lambda point: point["date"])
+
+    def window(end: date) -> float | None:
+        values = [by_day[end - timedelta(days=o)] for o in range(3) if (end - timedelta(days=o)) in by_day]
+        return None if len(values) < 3 else sum(values) / 3
+
+    recent, earlier = window(today), window(today - timedelta(days=7))
+    change = None if recent is None or earlier is None else recent - earlier
+    label = None
+    if change is not None and abs(change) > TREND_DEADBAND:
+        label = "Improving" if change > 0 else "Worsening"
+    return {
+        "score": scored_today["score"],
+        "low_volume": scored_today["low_volume"],
+        "news": scored_today["news"],
+        "social": scored_today["social"],
+        "change": change,
+        "label": label,
+        "series": series,
+    }
+
+
+def _http(url: str, headers: dict | None = None, data: bytes | None = None, timeout: int = 16) -> str:
+    request = urllib.request.Request(url, data=data, headers=headers or {})
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        return response.read().decode("utf-8", errors="replace")
+
+
+def fetch_reddit_posts(query: str, client_id: str | None, client_secret: str | None, http=None) -> dict:
+    """Recent Reddit posts for a search, using the free app-only login.
+
+    Needs a Reddit app (client id and secret). Without them it returns
+    ``{"configured": False}`` and makes no request. Reddit's free tier is
+    for non-commercial use. Never raises.
+    """
+    text = (query or "").strip()
+    if not client_id or not client_secret:
+        return {"configured": False, "available": False, "posts": []}
+    if not text:
+        return {"configured": True, "available": False, "posts": []}
+    get = http or _http
+    agent = {"User-Agent": "TradinglabsMacroDesk/1.0 (research dashboard)"}
+    try:
+        import base64
+
+        basic = base64.b64encode(f"{client_id}:{client_secret}".encode()).decode()
+        token_body = get("https://www.reddit.com/api/v1/access_token", {**agent, "Authorization": "Basic " + basic}, b"grant_type=client_credentials")
+        token = json.loads(token_body).get("access_token")
+        if not token:
+            return {"configured": True, "available": False, "posts": []}
+        url = "https://oauth.reddit.com/search?q=" + urllib.parse.quote(text) + "&sort=new&t=week&limit=8&type=link"
+        payload = json.loads(get(url, {**agent, "Authorization": "bearer " + token}))
+    except Exception:
+        return {"configured": True, "available": False, "posts": []}
+    posts = []
+    children = ((payload.get("data") or {}).get("children") or []) if isinstance(payload, dict) else []
+    for child in children:
+        data = child.get("data") if isinstance(child, dict) else None
+        if not isinstance(data, dict):
+            continue
+        title = str(data.get("title") or "").strip()
+        body = str(data.get("selftext") or "").strip()
+        author = str(data.get("author") or "").strip()
+        if not title or not author:
+            continue
+        link = str(data.get("permalink") or "")
+        posts.append({"author": "u/" + author, "text": (title + (". " + body[:200] if body else "")).strip(), "subreddit": str(data.get("subreddit") or ""), "link": "https://www.reddit.com" + link if link.startswith("/") else ""})
+    return {"configured": True, "available": True, "posts": posts[:5]}

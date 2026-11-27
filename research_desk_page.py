@@ -63,6 +63,11 @@ import streamlit as st
 
 from macro_desk_insights import (
     fetch_bluesky_posts,
+    fetch_reddit_posts,
+    score_texts,
+    score_text,
+    tone_of,
+    auto_sentiment_view,
     fetch_insider_many,
     fetch_us_insider_trades,
     load_sec_cik_map,
@@ -481,10 +486,29 @@ def cached_index_data(index_id: str) -> dict:
     return load_index_data(index_id)
 
 
+class _IncompleteCalendar(Exception):
+    """Carries a partial or empty calendar so it is shown but not cached."""
+
+
 @st.cache_data(ttl=3600, show_spinner=False)
+def _red_folder_cached() -> dict:
+    result = fetch_red_folder_events()
+    if not result.get("available") or result.get("partial") or result.get("stale"):
+        raise _IncompleteCalendar(result)
+    return result
+
+
 def cached_red_folder() -> dict:
-    """All high-impact events for the next 7 days, fetched at most hourly."""
-    return fetch_red_folder_events()
+    """All high-impact events for the next 7 days, fetched at most hourly.
+
+    A complete result is cached for an hour. A partial or failed result
+    (for example next week's feed refused) is shown but never cached, so
+    the next page load tries again; the fetch itself rate-limits retries.
+    """
+    try:
+        return _red_folder_cached()
+    except _IncompleteCalendar as exc:
+        return exc.args[0]
 
 
 # --- Constituents and breadth (spec section 4) ---------------------------
@@ -806,7 +830,9 @@ def render_calendar(calendar: dict | None, index_id: str | None = None) -> None:
                     st.session_state.macro_calendar = calendar
                     st.rerun()
     if isinstance(calendar, dict) and calendar.get("partial"):
-        st.caption("Next week's calendar feed was not available, so this list may end before the full 7 days.")
+        st.caption("Next week's calendar feed was not available, so this list may end before the full 7 days. It retries automatically.")
+    elif isinstance(calendar, dict) and calendar.get("stale"):
+        st.caption("Showing the last saved copy of one weekly feed because the latest download failed. Times and numbers may be out of date.")
 
 
 def render_red_folder_list(calendar: dict | None, index_id: str) -> None:
@@ -947,9 +973,84 @@ def cached_bluesky(query: str) -> dict:
     return fetch_bluesky_posts(query)
 
 
+SHOW_X_SENTIMENT = False  # X is hidden until a way to feed it is chosen
+
+
+def _secret(name: str) -> str | None:
+    """A key from Streamlit secrets or the environment, or None."""
+    try:
+        value = st.secrets.get(name)
+        if value:
+            return str(value)
+    except Exception:
+        pass
+    import os
+
+    return os.environ.get(name) or None
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def cached_news_titles(query: str) -> list[dict]:
+    """Headlines for a search (Google News RSS), refreshed every 30 minutes."""
+    return fetch_news_rss(query) or []
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def cached_reddit(query: str, client_id: str | None, client_secret: str | None) -> dict:
+    return fetch_reddit_posts(query, client_id, client_secret)
+
+
+def _reddit_feed(search: str) -> dict:
+    try:
+        return cached_reddit(search, _secret("REDDIT_CLIENT_ID"), _secret("REDDIT_CLIENT_SECRET"))
+    except Exception:
+        return {"configured": True, "available": False, "posts": []}
+
+
+def _bluesky_feed(search: str) -> dict:
+    try:
+        return cached_bluesky(search)
+    except Exception:
+        return {"available": False, "posts": []}
+
+
+def _auto_history(subject: str) -> dict:
+    return (st.session_state.get("macro_auto_sentiment") or {}).get(subject) or {}
+
+
 def _sentiment_for(subject: str) -> dict:
-    history = (st.session_state.get("macro_sentiment") or {}).get(subject) or {}
-    return sentiment_view(history, _london_today())
+    """Saved scores only (no network): used by the watchlist column."""
+    return auto_sentiment_view(_auto_history(subject), _london_today())
+
+
+def _live_sentiment(subject: str, news_query: str, social_query: str) -> dict:
+    """Score today's headlines and Bluesky/Reddit posts, save the day, return the view.
+
+    A source that is unavailable contributes nothing. The day is saved
+    only when at least one source has items, and is kept for the 30-day line.
+    """
+    try:
+        headlines = [str(n.get("title") or "") for n in cached_news_titles(news_query)]
+    except Exception:
+        headlines = []
+    posts = [str(p.get("text") or "") for p in (_bluesky_feed(social_query).get("posts") or [])]
+    posts += [str(p.get("text") or "") for p in (_reddit_feed(social_query).get("posts") or [])]
+    news, social = score_texts(headlines), score_texts(posts)
+    live = {"news": news["score"], "news_n": news["count"], "social": social["score"], "social_n": social["count"]}
+    today = _london_today()
+    if news["count"] or social["count"]:
+        store = dict(st.session_state.get("macro_auto_sentiment") or {})
+        days = dict(store.get(subject) or {})
+        days[today.isoformat()] = live
+        for old in sorted(days)[:-45]:
+            days.pop(old, None)
+        store[subject] = days
+        if store != st.session_state.get("macro_auto_sentiment"):
+            st.session_state.macro_auto_sentiment = store
+            _remember_watchlist()
+    view = auto_sentiment_view(_auto_history(subject), today, live)
+    view["news_n"], view["social_n"] = news["count"], social["count"]
+    return view
 
 
 def _signed_points(value: float | None) -> str:
@@ -958,71 +1059,71 @@ def _signed_points(value: float | None) -> str:
     return f"{value:+.0f}"
 
 
-def _render_sentiment_card(subject: str, label: str) -> None:
-    """Today's imported sentiment. A missing day stays blank."""
-    view = _sentiment_for(subject)
+def _render_sentiment_card(subject: str, label: str, news_query: str | None = None, social_query: str | None = None) -> None:
+    """Today's score from news headlines and Bluesky/Reddit posts, and the saved 30-day line."""
+    view = _live_sentiment(subject, news_query or f"{label} stock market", social_query or label)
     st.markdown(f"**Sentiment — {html.escape(label)}**")
     if view["score"] is None:
-        st.caption("No scored sentiment for today. Confirm an X import on the home page, with at least 3 posts. Fewer posts stay low volume and are not turned into a number.")
+        st.caption("No sentiment score yet today. A source needs at least 3 headlines or posts, and none of the feeds returned enough.")
     else:
         st.metric("Today", _signed_points(view["score"]))
         if view["label"]:
-            change = view["change"]
-            st.write(f"{view['label']} · {_signed_points(change)} versus 7 days ago.")
+            st.write(f"{view['label']} · {_signed_points(view['change'])} versus 7 days ago.")
         elif view["change"] is None:
-            st.caption("Not enough saved days for a 7-day change. That needs a scored day on each of the last 3 days, and on each of the 3 days a week earlier.")
+            st.caption("Not enough saved days for a 7-day change yet. That needs a score on each of the last 3 days and the 3 days a week earlier.")
         else:
             st.caption(f"{_signed_points(view['change'])} versus 7 days ago. Inside the quiet band, so it is not labelled improving or worsening.")
         if view["low_volume"]:
-            st.caption("Low volume. News scores are not connected, so this number is the imported X score on its own.")
+            only = "news" if view["social"] is None else "social posts"
+            st.caption(f"Low volume. Only {only} had enough items, so this is that source on its own.")
         else:
-            st.caption(f"News {_signed_points(view['news'])} · X {_signed_points(view['social'])}. Combined is 60% news and 40% X.")
+            st.caption(f"News {_signed_points(view['news'])} · Social {_signed_points(view['social'])}. Combined is 60% news and 40% social.")
     if view["series"]:
         frame = pd.DataFrame(view["series"])
         frame["date"] = frame["date"].astype(str)
-        chart = frame.set_index("date")[["combined", "social"]]
-        st.line_chart(chart, height=180)
-        st.caption("Saved days only, from −100 to +100. A day that was not imported is left out.")
+        st.line_chart(frame.set_index("date")[["combined"]], height=180)
+        st.caption("Saved days only, from −100 to +100. A day this page was not opened is left out.")
     else:
-        st.caption("No 30-day line yet. Each confirmed import adds that day's point.")
-    st.caption("Sentiment is an input, not a recommendation to trade.")
+        st.caption("No 30-day line yet. Each day this page is opened adds that day's point.")
+    st.caption("A simple keyword score on headlines and posts, not a person or an AI model. It is rough and easy to fool. Sentiment is an input, not a recommendation to trade.")
+
+
+def _post_line(author: str, text: str, link: str = "") -> None:
+    tone = tone_of(score_text(text))
+    st.markdown(f"**{html.escape(author)}** · {tone}")
+    st.write(text)
+    if link.startswith("https://"):
+        st.markdown(f"[Open post]({link})")
 
 
 def _render_social(subject: str, search: str) -> None:
-    """X posts from a confirmed import, plus unscored Bluesky posts when the feed answers."""
+    """Bluesky and Reddit posts, each with a keyword tone. X only when enabled."""
     st.markdown(f"**Social posts mentioning {html.escape(search)}**")
-    choice = st.radio("Source", ["All", "Bluesky", "Reddit", "X"], horizontal=True, key=f"macro_social_{subject}")
-    view = _sentiment_for(subject)
-    latest = view.get("latest") or {}
-    posts = latest.get("posts") if isinstance(latest.get("posts"), list) else []
-    if choice in {"All", "X"}:
-        if not posts:
-            st.caption("No X data imported for this yet. Use Import X sentiment on the home page.")
-        else:
-            st.caption(f"Imported {latest.get('date')}. {latest.get('summary') or ''}")
-            for post in posts:
-                tone = str(post.get("tone") or "neutral")
-                st.markdown(f"**{html.escape(str(post.get('author') or ''))}** · {html.escape(tone)}")
-                st.write(str(post.get("text") or ""))
-                link = str(post.get("link") or "")
-                if link.startswith("https://") or link.startswith("http://"):
-                    st.markdown(f"[Open post]({link})")
+    options = ["All", "Bluesky", "Reddit"] + (["X"] if SHOW_X_SENTIMENT else [])
+    choice = st.radio("Source", options, horizontal=True, key=f"macro_social_{subject}")
+    if SHOW_X_SENTIMENT and choice in {"All", "X"}:
+        latest = ((st.session_state.get("macro_sentiment") or {}).get(subject) or {})
+        latest = latest[max(latest)] if latest else {}
+        for post in (latest.get("posts") if isinstance(latest.get("posts"), list) else []):
+            _post_line(str(post.get("author") or ""), str(post.get("text") or ""), str(post.get("link") or ""))
     if choice in {"All", "Bluesky"}:
-        try:
-            feed = cached_bluesky(search)
-        except Exception:
-            feed = {"available": False, "posts": []}
+        feed = _bluesky_feed(search)
         if not feed.get("available"):
             st.caption("Bluesky feed unavailable.")
         elif not feed.get("posts"):
             st.caption("No recent Bluesky posts for this search.")
-        else:
-            st.caption("Bluesky posts are unscored. This desk does not assign them a tone.")
-            for post in feed["posts"]:
-                st.markdown(f"**{html.escape(str(post.get('author') or ''))}** · unscored")
-                st.write(str(post.get("text") or ""))
-    if choice == "Reddit":
-        st.caption("Reddit is not connected. Its free API needs an app registration, so this tab stays empty.")
+        for post in feed.get("posts") or []:
+            _post_line(str(post.get("author") or ""), str(post.get("text") or ""))
+    if choice in {"All", "Reddit"}:
+        feed = _reddit_feed(search)
+        if not feed.get("configured"):
+            st.caption("Reddit is off until REDDIT_CLIENT_ID and REDDIT_CLIENT_SECRET are added to the app's secrets (a free Reddit app, for non-commercial use).")
+        elif not feed.get("available"):
+            st.caption("Reddit feed unavailable.")
+        elif not feed.get("posts"):
+            st.caption("No recent Reddit posts for this search.")
+        for post in feed.get("posts") or []:
+            _post_line(f"{post.get('author')} · r/{post.get('subreddit')}", str(post.get("text") or ""), str(post.get("link") or ""))
 
 
 def _news_html(entries: list[dict]) -> str:
@@ -1053,6 +1154,61 @@ def _pct_text(value: float | None) -> str:
     return f"{value:+.1f}%"
 
 
+def months_beating_average(report: dict) -> tuple[int, int] | None:
+    """(months this year beat the average of the two previous years, months compared)."""
+    years = report.get("years") or []
+    if not years:
+        return None
+    current = (report.get("monthly") or {}).get(str(years[0])) or []
+    average = report.get("average") or []
+    pairs = [(c, a) for c, a in zip(current, average) if c is not None and a is not None]
+    if not pairs:
+        return None
+    return sum(1 for c, a in pairs if c > a), len(pairs)
+
+
+def build_seasonality_figure(report: dict, theme: str = "Light"):
+    """Year-to-date lines on one Jan to Dec axis.
+
+    Gaps where a year has no close on a calendar day are bridged so the
+    lines read as continuous paths. The current year is the thick blue
+    line with an end dot; previous years are thinner and muted, so a red
+    line never reads as a verdict on the year.
+    """
+    try:
+        import plotly.graph_objects as go
+    except ImportError:
+        return None
+    labels = report.get("labels") or []
+    years = report.get("years") or []
+    chart = report.get("chart") or {}
+    if not labels or not years:
+        return None
+    xs = pd.to_datetime(["2025-" + label for label in labels], errors="coerce")
+    dark = theme == "Dark"
+    text = "#f1f5f9" if dark else "#111827"
+    grid = "rgba(241,245,249,0.12)" if dark else "rgba(17,24,39,0.10)"
+    card = "#1e293b" if dark else "#ffffff"
+    colours = ["#60a5fa" if dark else "#2563eb", "#fb923c" if dark else "#d97706", "#94a3b8"]
+    widths = [3, 1.8, 1.8]
+    fig = go.Figure()
+    for index, year in enumerate(years):
+        values = chart.get(str(year)) or []
+        if len(values) != len(xs):
+            continue
+        fig.add_trace(go.Scatter(x=xs, y=values, mode="lines", name=str(year), connectgaps=True, line=dict(color=colours[index % 3], width=widths[index % 3]), hovertemplate=f"{year}: %{{y:+.1f}}%<extra></extra>"))
+        if index == 0:
+            filled = [(x, v) for x, v in zip(xs, values) if v is not None and not pd.isna(v)]
+            if filled:
+                fig.add_trace(go.Scatter(x=[filled[-1][0]], y=[filled[-1][1]], mode="markers", marker=dict(size=9, color=colours[0], line=dict(color=card, width=2)), hoverinfo="skip", showlegend=False))
+    if not fig.data:
+        return None
+    fig.update_layout(height=300, margin=dict(l=8, r=8, t=8, b=8), paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)", font=dict(color=text, family="DM Sans, sans-serif"), hovermode="x unified", legend=dict(orientation="h", y=1.1, x=0), dragmode=False)
+    fig.update_xaxes(tickformat="%b", dtick="M1", showgrid=False, fixedrange=True)
+    fig.update_yaxes(side="right", ticksuffix="%", showgrid=True, gridcolor=grid, zeroline=True, zerolinecolor=text, zerolinewidth=1, fixedrange=True)
+    return fig
+
+
 def _render_seasonality(item: dict) -> None:
     """Year-to-date path for this year and the previous two, from daily closes."""
     st.markdown("### Seasonality — year to date vs previous years")
@@ -1069,8 +1225,12 @@ def _render_seasonality(item: dict) -> None:
         f"Same point in {years[1]}: {_pct_text(summary.get(str(years[1])))}. "
         f"In {years[2]}: {_pct_text(summary.get(str(years[2])))}."
     )
-    chart = pd.DataFrame(report["chart"], index=report["labels"])
-    st.line_chart(chart, height=260)
+    fig = build_seasonality_figure(report, _current_theme())
+    if fig is not None:
+        st.plotly_chart(fig, use_container_width=True, config={"displaylogo": False, "displayModeBar": False}, key="macro_seasonality_chart")
+    else:
+        chart = pd.DataFrame(report["chart"], index=report["labels"])
+        st.line_chart(chart, height=260)
     st.caption("Each line is the percent change from that year's first published close. The current year stops at the latest close.")
     months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
     rows = []
@@ -1083,7 +1243,19 @@ def _render_seasonality(item: dict) -> None:
     for month, value in zip(months, report["average"]):
         average_row[month] = None if value is None else round(float(value), 1)
     rows.append(average_row)
-    st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")
+    table = pd.DataFrame(rows)
+
+    def _tint(value: object) -> str:
+        if isinstance(value, (int, float)) and not pd.isna(value):
+            return "color: #15803d" if value > 0 else "color: #b42318" if value < 0 else ""
+        return ""
+
+    styled = table.style.map(_tint, subset=months).format("{:+.1f}%", subset=months, na_rep="–")
+    st.dataframe(styled, hide_index=True, width="stretch")
+    beat = months_beating_average(report)
+    if beat is not None:
+        won, total = beat
+        st.markdown(f"{years[0]} has beaten the {report['average_label'].replace('Avg ', '')} average in **{won} of {total}** months so far (the current month is partial).")
     partial = months[int(report["partial_month"]) - 1]
     st.caption(f"{partial} {years[0]} is partial. Later months are blank. A blank cell means that close was not published.")
 
@@ -1199,7 +1371,7 @@ def render_index_page(index_id: str, data: dict, calendar: dict | None) -> None:
     st.caption("Trend: Bullish if the latest close is above the 50-period EMA and the 50 EMA is rising, otherwise Bearish (spec section 4).")
     left, right = st.columns(2)
     with left:
-        _render_sentiment_card(index_id, item["label"])
+        _render_sentiment_card(index_id, item["label"], f"{item['label']} {item['name']} market news", item["label"])
     with right:
         _render_social(index_id, item["label"])
     _render_seasonality(item)
@@ -1275,6 +1447,7 @@ def _hydrate_watchlist() -> None:
     cached = load_watchlist_cache()
     st.session_state.macro_added = cached.get("added") or {}
     st.session_state.macro_sentiment = cached.get("sentiment") if isinstance(cached.get("sentiment"), dict) else {}
+    st.session_state.macro_auto_sentiment = cached.get("auto_sentiment") if isinstance(cached.get("auto_sentiment"), dict) else {}
     st.session_state.macro_hydrated = True
 
 
@@ -1283,6 +1456,7 @@ def _remember_watchlist() -> None:
         save_watchlist_cache({
             "added": st.session_state.get("macro_added") or {},
             "sentiment": st.session_state.get("macro_sentiment") or {},
+            "auto_sentiment": st.session_state.get("macro_auto_sentiment") or {},
         })
     except OSError:
         st.warning("The new watchlist is showing, but it could not be saved for the next page load.")
@@ -1447,7 +1621,8 @@ def _render_watchlist() -> None:
     added = st.session_state.get("macro_added") or {}
     if not added:
         st.caption("Your watchlist is empty – search above to add a stock.")
-        _render_x_import()
+        if SHOW_X_SENTIMENT:
+            _render_x_import()
         return
     rows = [_watchlist_row(snapshot) for snapshot in added.values()]
     rows.sort(key=lambda row: str(row.get("ticker") or ""))
@@ -1482,7 +1657,7 @@ def _render_watchlist() -> None:
         forward_value = row.get("forward_pe")
         forward_pe = f"{forward_value:.1f}x" if isinstance(forward_value, (int, float)) and forward_value > 0 else "n/m"
         parent = f" · {row['parent']}" if row.get("parent") else ""
-        sentiment_view_row = _sentiment_for(ticker)
+        sentiment_view_row = _sentiment_for(ticker)  # saved days only; fills in when the stock or index page is opened
         if sentiment_view_row["score"] is None:
             sentiment_cell = "—"
         else:
@@ -1510,7 +1685,8 @@ def _render_watchlist() -> None:
             _remove_ticker(ticker)
             st.rerun()
     st.caption("Click a stock to open its page. Or select an index above for its chart, news, red folder events and constituents.")
-    _render_x_import()
+    if SHOW_X_SENTIMENT:
+        _render_x_import()
 
 
 def _import_aliases() -> dict[str, str]:
@@ -1684,7 +1860,7 @@ def _render_stock_page(ticker: str) -> None:
     )
     left, right = st.columns(2)
     with left:
-        _render_sentiment_card(ticker, ticker)
+        _render_sentiment_card(ticker, ticker, f"{ticker} {row.get('name') or ''} stock", "$" + ticker)
     with right:
         _render_social(ticker, "$" + ticker)
     st.markdown("### Recent news")
