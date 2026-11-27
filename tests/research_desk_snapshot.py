@@ -614,6 +614,47 @@ def test_seasonality_figure_bridges_gaps_and_counts_months_beating_average() -> 
     assert page.build_seasonality_figure({"years": [2026], "labels": [], "chart": {}}, "Dark") is None
 
 
+def test_free_feed_sentiment_scores_headlines_and_hides_x() -> None:
+    import json as _json
+    import research_desk_page as page
+    from macro_desk_insights import auto_sentiment_view, fetch_reddit_posts, score_text, score_texts, tone_of
+
+    assert score_text("Shares surge as profits beat estimates") > 0.5
+    assert score_text("Stock plunges after profit warning") < -0.5
+    assert score_text("Results did not beat estimates") < 0
+    assert score_text("Company holds annual meeting") == 0.0
+    assert tone_of(0.5) == "bullish" and tone_of(-0.5) == "bearish" and tone_of(0.0) == "neutral" and tone_of(None) == "neutral"
+    assert score_texts([]) == {"score": None, "count": 0}
+    assert score_texts(["Shares surge", "Stock plunges"])["score"] == 0.0
+
+    today = date(2026, 11, 27)
+    history = {(today - timedelta(days=o)).isoformat(): {"news": 10.0 + o, "news_n": 5, "social": None, "social_n": 0} for o in list(range(1, 3)) + list(range(7, 10))}
+    view = auto_sentiment_view(history, today, {"news": 80.0, "news_n": 5, "social": 20.0, "social_n": 4})
+    assert view["score"] == 0.6 * 80.0 + 0.4 * 20.0 and view["low_volume"] is False
+    assert view["change"] is not None and view["label"] == "Improving"
+    thin = auto_sentiment_view({}, today, {"news": 40.0, "news_n": 2, "social": None, "social_n": 0})
+    assert thin["score"] is None
+
+    assert fetch_reddit_posts("NVDA", None, None) == {"configured": False, "available": False, "posts": []}
+    calls = []
+
+    def fake(url, headers=None, data=None, timeout=16):
+        calls.append(url)
+        if "access_token" in url:
+            return _json.dumps({"access_token": "tok"})
+        return _json.dumps({"data": {"children": [{"data": {"title": "NVDA rally continues", "selftext": "", "author": "bob", "subreddit": "stocks", "permalink": "/r/stocks/1"}}, {"data": {"title": "", "author": "x"}}]}})
+
+    got = fetch_reddit_posts("NVDA", "id", "secret", http=fake)
+    assert got["available"] and len(got["posts"]) == 1 and got["posts"][0]["author"] == "u/bob"
+    assert got["posts"][0]["link"] == "https://www.reddit.com/r/stocks/1" and len(calls) == 2
+
+    def broken(url, headers=None, data=None, timeout=16):
+        raise OSError("down")
+
+    assert fetch_reddit_posts("NVDA", "id", "secret", http=broken)["available"] is False
+    assert page.SHOW_X_SENTIMENT is False
+
+
 if __name__ == "__main__":
     test_macro_indices_are_five_in_spec_order()
     test_ema_trend_bullish_when_above_rising_ema()
@@ -646,4 +687,5 @@ if __name__ == "__main__":
     test_one_search_box_suggests_symbols_as_you_type()
     test_red_folder_falls_back_to_last_good_feed_and_is_not_cached_when_partial()
     test_seasonality_figure_bridges_gaps_and_counts_months_beating_average()
+    test_free_feed_sentiment_scores_headlines_and_hides_x()
     print("Macro Desk checks passed.")
