@@ -543,6 +543,27 @@ def test_one_search_box_suggests_symbols_as_you_type() -> None:
         page.search_symbols = original
 
 
+def test_seasonality_figure_bridges_gaps_and_counts_months_beating_average() -> None:
+    import research_desk_page as page
+
+    labels = ["01-01", "01-02", "01-03", "01-04"]
+    report = {
+        "years": [2026, 2025, 2024],
+        "labels": labels,
+        "chart": {"2026": [0.0, None, 2.0, 3.0], "2025": [0.0, 1.0, None, 5.0], "2024": [0.0, 1.0, 2.0, 4.0]},
+        "monthly": {"2026": [3.0, -1.0, None], "2025": [1.0, 2.0, 1.0], "2024": [1.0, 0.0, 1.0]},
+        "average": [1.0, 1.0, 1.0],
+        "average_label": "Avg 2024\u20132025",
+    }
+    fig = page.build_seasonality_figure(report, "Light")
+    lines = [trace for trace in fig.data if trace.mode == "lines"]
+    assert len(lines) == 3 and all(trace.connectgaps for trace in lines)
+    assert lines[0].line.width > lines[1].line.width
+    assert page.months_beating_average(report) == (1, 2)
+    assert page.months_beating_average({"years": [], "monthly": {}, "average": []}) is None
+    assert page.build_seasonality_figure({"years": [2026], "labels": [], "chart": {}}, "Dark") is None
+
+
 if __name__ == "__main__":
     test_macro_indices_are_five_in_spec_order()
     test_ema_trend_bullish_when_above_rising_ema()
@@ -573,4 +594,5 @@ if __name__ == "__main__":
     test_price_figure_is_fixed_size_with_range_buttons()
     test_breadth_table_says_yes_or_no_and_index_page_has_no_red_folder_list()
     test_one_search_box_suggests_symbols_as_you_type()
+    test_seasonality_figure_bridges_gaps_and_counts_months_beating_average()
     print("Macro Desk checks passed.")

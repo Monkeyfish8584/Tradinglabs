@@ -1053,6 +1053,61 @@ def _pct_text(value: float | None) -> str:
     return f"{value:+.1f}%"
 
 
+def months_beating_average(report: dict) -> tuple[int, int] | None:
+    """(months this year beat the average of the two previous years, months compared)."""
+    years = report.get("years") or []
+    if not years:
+        return None
+    current = (report.get("monthly") or {}).get(str(years[0])) or []
+    average = report.get("average") or []
+    pairs = [(c, a) for c, a in zip(current, average) if c is not None and a is not None]
+    if not pairs:
+        return None
+    return sum(1 for c, a in pairs if c > a), len(pairs)
+
+
+def build_seasonality_figure(report: dict, theme: str = "Light"):
+    """Year-to-date lines on one Jan to Dec axis.
+
+    Gaps where a year has no close on a calendar day are bridged so the
+    lines read as continuous paths. The current year is the thick blue
+    line with an end dot; previous years are thinner and muted, so a red
+    line never reads as a verdict on the year.
+    """
+    try:
+        import plotly.graph_objects as go
+    except ImportError:
+        return None
+    labels = report.get("labels") or []
+    years = report.get("years") or []
+    chart = report.get("chart") or {}
+    if not labels or not years:
+        return None
+    xs = pd.to_datetime(["2025-" + label for label in labels], errors="coerce")
+    dark = theme == "Dark"
+    text = "#f1f5f9" if dark else "#111827"
+    grid = "rgba(241,245,249,0.12)" if dark else "rgba(17,24,39,0.10)"
+    card = "#1e293b" if dark else "#ffffff"
+    colours = ["#60a5fa" if dark else "#2563eb", "#fb923c" if dark else "#d97706", "#94a3b8"]
+    widths = [3, 1.8, 1.8]
+    fig = go.Figure()
+    for index, year in enumerate(years):
+        values = chart.get(str(year)) or []
+        if len(values) != len(xs):
+            continue
+        fig.add_trace(go.Scatter(x=xs, y=values, mode="lines", name=str(year), connectgaps=True, line=dict(color=colours[index % 3], width=widths[index % 3]), hovertemplate=f"{year}: %{{y:+.1f}}%<extra></extra>"))
+        if index == 0:
+            filled = [(x, v) for x, v in zip(xs, values) if v is not None and not pd.isna(v)]
+            if filled:
+                fig.add_trace(go.Scatter(x=[filled[-1][0]], y=[filled[-1][1]], mode="markers", marker=dict(size=9, color=colours[0], line=dict(color=card, width=2)), hoverinfo="skip", showlegend=False))
+    if not fig.data:
+        return None
+    fig.update_layout(height=300, margin=dict(l=8, r=8, t=8, b=8), paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)", font=dict(color=text, family="DM Sans, sans-serif"), hovermode="x unified", legend=dict(orientation="h", y=1.1, x=0), dragmode=False)
+    fig.update_xaxes(tickformat="%b", dtick="M1", showgrid=False, fixedrange=True)
+    fig.update_yaxes(side="right", ticksuffix="%", showgrid=True, gridcolor=grid, zeroline=True, zerolinecolor=text, zerolinewidth=1, fixedrange=True)
+    return fig
+
+
 def _render_seasonality(item: dict) -> None:
     """Year-to-date path for this year and the previous two, from daily closes."""
     st.markdown("### Seasonality — year to date vs previous years")
@@ -1069,8 +1124,12 @@ def _render_seasonality(item: dict) -> None:
         f"Same point in {years[1]}: {_pct_text(summary.get(str(years[1])))}. "
         f"In {years[2]}: {_pct_text(summary.get(str(years[2])))}."
     )
-    chart = pd.DataFrame(report["chart"], index=report["labels"])
-    st.line_chart(chart, height=260)
+    fig = build_seasonality_figure(report, _current_theme())
+    if fig is not None:
+        st.plotly_chart(fig, use_container_width=True, config={"displaylogo": False, "displayModeBar": False}, key="macro_seasonality_chart")
+    else:
+        chart = pd.DataFrame(report["chart"], index=report["labels"])
+        st.line_chart(chart, height=260)
     st.caption("Each line is the percent change from that year's first published close. The current year stops at the latest close.")
     months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
     rows = []
@@ -1083,7 +1142,19 @@ def _render_seasonality(item: dict) -> None:
     for month, value in zip(months, report["average"]):
         average_row[month] = None if value is None else round(float(value), 1)
     rows.append(average_row)
-    st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")
+    table = pd.DataFrame(rows)
+
+    def _tint(value: object) -> str:
+        if isinstance(value, (int, float)) and not pd.isna(value):
+            return "color: #15803d" if value > 0 else "color: #b42318" if value < 0 else ""
+        return ""
+
+    styled = table.style.map(_tint, subset=months).format("{:+.1f}%", subset=months, na_rep="–")
+    st.dataframe(styled, hide_index=True, width="stretch")
+    beat = months_beating_average(report)
+    if beat is not None:
+        won, total = beat
+        st.markdown(f"{years[0]} has beaten the {report['average_label'].replace('Avg ', '')} average in **{won} of {total}** months so far (the current month is partial).")
     partial = months[int(report["partial_month"]) - 1]
     st.caption(f"{partial} {years[0]} is partial. Later months are blank. A blank cell means that close was not published.")
 
