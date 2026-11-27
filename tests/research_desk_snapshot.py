@@ -655,6 +655,54 @@ def test_free_feed_sentiment_scores_headlines_and_hides_x() -> None:
     assert page.SHOW_X_SENTIMENT is False
 
 
+def test_watchlist_delete_is_a_link_at_the_end_of_each_row_and_removes_the_stock() -> None:
+    from streamlit.testing.v1 import AppTest
+
+    def app() -> None:
+        import sys
+
+        sys.path.insert(0, str(__import__("os").environ["TL_ROOT"]))
+        import research_desk_page as page
+
+        snap = lambda t: {"ticker": t, "name": t + " Inc", "price": 100.0, "currency": "USD", "closes": [90.0] * 60, "closeDates": [], "target": 120.0}
+        saved = __import__("builtins").__dict__.setdefault("_wl_saved", [])
+        page.load_watchlist_cache = lambda path=None: {"added": {"NVDA": snap("NVDA"), "SAP": snap("SAP")}}
+        page.save_watchlist_cache = lambda payload, path=None: saved.append(sorted(payload["added"]))
+        page.render_strip = lambda active_id=None: {}
+        page.cached_red_folder = lambda *a, **k: {"events": [], "available": True, "partial": False}
+        page.render_calendar = lambda *a, **k: None
+        page.render_event_detail = lambda *a, **k: None
+        page.cached_insider_batch = lambda *a, **k: {}
+        page.render_macro_desk()
+
+    import os
+
+    os.environ["TL_ROOT"] = str(ROOT)
+    at = AppTest.from_function(app)
+    at.run(timeout=60)
+    assert not at.exception
+    table = next(m.value for m in at.markdown if "md-watchlist" in m.value and "<table" in m.value)
+    assert table.count("md-remove") >= 2 and "remove=NVDA" in table and "remove=SAP" in table
+    assert not [b for b in at.button if b.label == "\u2715"]
+
+    at2 = AppTest.from_function(app)
+    at2.query_params["remove"] = "NVDA"
+    at2.run(timeout=60)
+    assert not at2.exception
+    table2 = next(m.value for m in at2.markdown if "md-watchlist" in m.value and "<table" in m.value)
+    assert "remove=NVDA" not in table2 and "remove=SAP" in table2
+    assert "remove" not in at2.query_params
+
+
+def test_dark_and_light_themes_style_the_sidebar_and_buttons() -> None:
+    from research_desk_page import MACRO_THEME_CSS
+
+    for name, bg in (("Dark", "#0b1220"), ("Light", "#eef2f7")):
+        css = MACRO_THEME_CSS[name]
+        assert 'stSidebar"] { background: ' + bg in css
+        assert "stSidebar" in css and ".stButton button" in css and "table.md-watchlist a" in css
+
+
 if __name__ == "__main__":
     test_macro_indices_are_five_in_spec_order()
     test_ema_trend_bullish_when_above_rising_ema()
@@ -688,4 +736,6 @@ if __name__ == "__main__":
     test_red_folder_falls_back_to_last_good_feed_and_is_not_cached_when_partial()
     test_seasonality_figure_bridges_gaps_and_counts_months_beating_average()
     test_free_feed_sentiment_scores_headlines_and_hides_x()
+    test_watchlist_delete_is_a_link_at_the_end_of_each_row_and_removes_the_stock()
+    test_dark_and_light_themes_style_the_sidebar_and_buttons()
     print("Macro Desk checks passed.")

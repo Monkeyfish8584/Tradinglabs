@@ -249,6 +249,8 @@ MACRO_CSS = """
 .md-news-item { margin: 0.45rem 0; font-size: 0.92rem; }
 .md-news-meta { font-size: 0.78rem; color: #666; }
 .md-breadth-num { font-family: 'DM Mono', monospace; font-size: 1.5rem; font-weight: 500; }
+.md-remove { text-decoration: none; font-weight: 700; padding: 0.15rem 0.45rem; border-radius: 6px; }
+.md-remove:hover { background: rgba(180,35,24,0.18); }
 .md-dot { display: inline-block; width: 0.7rem; height: 0.7rem; border-radius: 50%; }
 .md-dot-on { background: #15803d; } .md-dot-off { background: rgba(128,128,128,0.35); }
 table.md-watchlist { width: 100%; border-collapse: collapse; font-size: 0.92rem; }
@@ -295,6 +297,10 @@ MACRO_THEME_CSS: dict[str, str] = {
 table.md-watchlist th, table.md-watchlist td { color: #111827 !important; }
 .md-event-chip { color: #111827 !important; }
 .md-hero, .md-hero h2, .md-hero .md-hero-price { color: #ffffff !important; }
+table.md-watchlist a { color: #1d4ed8 !important; } .md-remove { color: #6b7280 !important; } .md-remove:hover { color: #b42318 !important; }
+[data-testid="stSidebar"] { background: #eef2f7 !important; }
+[data-testid="stSidebar"] a, [data-testid="stSidebar"] span, [data-testid="stSidebar"] p, [data-testid="stSidebar"] li { color: #111827 !important; }
+.stButton button, [data-testid="stBaseButton-secondary"] { background: #ffffff !important; color: #111827 !important; border-color: rgba(17,24,39,0.25) !important; }
 </style>
 """,
     "Dark": """
@@ -311,6 +317,10 @@ table.md-watchlist th, table.md-watchlist td { color: #111827 !important; }
 table.md-watchlist th, table.md-watchlist td { color: #f1f5f9 !important; }
 .md-event-chip { color: #f1f5f9 !important; }
 .md-hero, .md-hero h2, .md-hero .md-hero-price { color: #ffffff !important; }
+table.md-watchlist a { color: #93c5fd !important; } .md-remove { color: #cbd5e1 !important; } .md-remove:hover { color: #f87171 !important; }
+[data-testid="stSidebar"] { background: #0b1220 !important; }
+[data-testid="stSidebar"] a, [data-testid="stSidebar"] span, [data-testid="stSidebar"] p, [data-testid="stSidebar"] li { color: #f1f5f9 !important; }
+.stButton button, [data-testid="stBaseButton-secondary"] { background: #1e293b !important; color: #f1f5f9 !important; border-color: rgba(241,245,249,0.25) !important; }
 </style>
 """,
 }
@@ -1584,6 +1594,27 @@ def _add_ticker(raw: str) -> None:
     st.success(f"Added {ticker}. Blank fields were not published by the source.")
 
 
+def _handle_remove_param() -> None:
+    """Remove the stock named in ?remove=TICKER (the X at the end of its row), then drop the parameter."""
+    try:
+        value = st.query_params.get("remove")
+    except Exception:
+        return
+    if isinstance(value, list):
+        value = value[0] if value else None
+    if not isinstance(value, str) or not value.strip():
+        return
+    wanted = value.strip().upper()
+    added = st.session_state.get("macro_added") or {}
+    for ticker in list(added):
+        if str(ticker).upper() == wanted:
+            _remove_ticker(ticker)
+    try:
+        del st.query_params["remove"]
+    except Exception:
+        pass
+
+
 def _remove_ticker(ticker: str) -> None:
     added = dict(st.session_state.get("macro_added") or {})
     added.pop(ticker, None)
@@ -1670,20 +1701,17 @@ def _render_watchlist() -> None:
         if (filing.get("summary") or {}).get("insider_buying"):
             buying = "<br><span class='md-up'>Insider buying</span>"
         stock_href = _link_with_theme("stock=" + urllib.parse.quote(ticker))
+        remove_href = _link_with_theme("remove=" + urllib.parse.quote(ticker))
         body_rows.append(
             f"<tr><td><a href='{stock_href}' target='_self'><strong>{html.escape(ticker)}</strong></a><br>"
             f"{html.escape(str(row.get('name') or ''))}{html.escape(parent)}{buying}</td>"
             f"<td class='md-mono'>{price}</td><td class='md-mono'>{target_cell}</td>"
             f"<td>{above_below(row.get('above50'))}</td><td>{above_below(row.get('above200'))}</td>"
             f"<td>{bull_bear(row.get('weekly'))}</td><td>{bull_bear(row.get('daily'))}</td>"
-            f"<td class='md-mono'>{forward_pe}</td><td class='md-mono'>{html.escape(sentiment_cell)}</td><td></td></tr>"
+            f"<td class='md-mono'>{forward_pe}</td><td class='md-mono'>{html.escape(sentiment_cell)}</td>"
+            f"<td><a class='md-remove' href='{remove_href}' target='_self' title='Remove {html.escape(ticker)} from the watchlist' aria-label='Remove {html.escape(ticker)}'>✕</a></td></tr>"
         )
     st.markdown(_macro_css(_current_theme()) + f'<div style="overflow-x:auto"><table class="md-watchlist">{header}{"".join(body_rows)}</table></div>', unsafe_allow_html=True)
-    for row in rows:
-        ticker = str(row.get("ticker") or "")
-        if st.button("✕", key=f"macro_remove_{ticker}", help=f"Remove {ticker} from the watchlist"):
-            _remove_ticker(ticker)
-            st.rerun()
     st.caption("Click a stock to open its page. Or select an index above for its chart, news, red folder events and constituents.")
     if SHOW_X_SENTIMENT:
         _render_x_import()
@@ -1913,6 +1941,7 @@ def render_macro_desk() -> None:
     # below then returns the widget's value, which wins and is written
     # back into the URL so the next page change carries it.
     _sync_theme()
+    _handle_remove_param()
     theme = st.radio("Theme", options=["Light", "Dark"], index=0 if _current_theme() == "Light" else 1, horizontal=True, key="macro_theme_radio")
     st.session_state.macro_theme = theme
     _set_theme_query_param(theme)
