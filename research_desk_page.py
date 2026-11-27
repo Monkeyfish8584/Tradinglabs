@@ -229,10 +229,9 @@ MACRO_CSS = """
 .md-bull { background: rgba(21,128,61,0.12); color: #15803d; }
 .md-bear { background: rgba(180,35,24,0.12); color: #b42318; }
 .md-missing { background: rgba(128,128,128,0.15); color: #666; }
-.md-gauges { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px; margin-top: 0.35rem; }
-.md-gauge-label { display: block; font-size: 0.68rem; color: #666; line-height: 1.2; }
-.md-gauge-num { display: block; font-family: 'DM Mono', monospace; font-weight: 500; font-size: 0.72rem; line-height: 1.2; white-space: nowrap; }
-.md-gauge-track { height: 5px; border-radius: 3px; background: rgba(128,128,128,0.25); margin: 0.15rem 0 0; overflow: hidden; }
+.md-gauge-label { font-size: 0.78rem; color: #666; }
+.md-gauge-num { font-family: 'DM Mono', monospace; font-weight: 500; }
+.md-gauge-track { height: 6px; border-radius: 3px; background: rgba(128,128,128,0.25); margin: 0.2rem 0 0.45rem; overflow: hidden; }
 .md-gauge-fill { height: 100%; border-radius: 3px; }
 .md-hero { border-radius: 12px; padding: 1.1rem 1.2rem; color: #fff; margin-bottom: 0.6rem; position: relative; overflow: hidden; }
 .md-hero h2 { margin: 0; color: #fff; }
@@ -580,40 +579,16 @@ def cached_constituents(index_id: str) -> dict:
     return {"symbols": constituent_symbols(page, index_id), "names": constituent_names(page, index_id)}
 
 
-def session_extreme(last: dict | None, previous: dict | None) -> tuple[bool, bool]:
-    """Whether this session made a new high or a new low versus the previous one.
-
-    A new high is this session's high above the previous session's high.
-    A new low is this session's low below the previous session's low.
-    A missing price counts as neither. One session can be both.
-    """
-
-    def price(candle: dict | None, key: str) -> float | None:
-        if not isinstance(candle, dict):
-            return None
-        value = candle.get(key)
-        if isinstance(value, bool) or not isinstance(value, (int, float)):
-            return None
-        return float(value)
-
-    last_high, prev_high = price(last, "high"), price(previous, "high")
-    last_low, prev_low = price(last, "low"), price(previous, "low")
-    new_high = last_high is not None and prev_high is not None and last_high > prev_high
-    new_low = last_low is not None and prev_low is not None and last_low < prev_low
-    return new_high, new_low
-
-
 def breadth_summary(index_id: str, per_symbol: list[dict | None]) -> dict:
-    """Above-50MA, new-high and new-low counts.
+    """Above-50MA and new-high counts, per the spec's definitions.
 
     ``per_symbol`` is one entry per constituent: {"above50": bool|None,
-    "new_high": bool|None, "new_low": bool|None} or None when that
-    constituent published no usable closes. Missing constituents stay
-    out of the counts.
+    "new_high": bool|None} or None when that constituent published no
+    usable closes. Missing constituents stay out of both counts.
     """
-    above = highs = lows = measured = unknown = 0
+    above = highs = measured = unknown = 0
     for item in per_symbol:
-        if not item or item.get("above50") is None and item.get("new_high") is None and item.get("new_low") is None:
+        if not item or item.get("above50") is None and item.get("new_high") is None:
             unknown += 1
             continue
         measured += 1
@@ -621,32 +596,21 @@ def breadth_summary(index_id: str, per_symbol: list[dict | None]) -> dict:
             above += 1
         if item.get("new_high"):
             highs += 1
-        if item.get("new_low"):
-            lows += 1
     listed = len(per_symbol)
     ready = listed > 0 and measured > 0 and measured * 2 >= listed
-    return {
-        "index_id": index_id,
-        "listed": listed,
-        "measured": measured,
-        "unknown": unknown,
-        "above50": above,
-        "new_highs": highs,
-        "new_lows": lows,
-        "ready": ready,
-    }
+    return {"index_id": index_id, "listed": listed, "measured": measured, "unknown": unknown, "above50": above, "new_highs": highs, "ready": ready}
 
 
 def load_macro_breadth(index_id: str, getter=None) -> dict:
-    """Breadth for one index: above 50MA, new highs and new lows vs the previous day.
+    """Breadth for one index: above 50MA and new highs vs previous day.
 
     Each constituent needs at least 51 daily closes for its 50-day SMA
-    and the last two sessions' highs and lows. A constituent that does
-    not publish them is left out of the counts.
+    and the last two sessions' highs for the new-high read. A constituent
+    that does not publish them is left out, never counted as either.
     """
     symbols = cached_constituents(index_id).get("symbols") or []
     if not symbols:
-        return {"index_id": index_id, "listed": 0, "measured": 0, "unknown": 0, "above50": 0, "new_highs": 0, "new_lows": 0, "ready": False, "top": []}
+        return {"index_id": index_id, "listed": 0, "measured": 0, "unknown": 0, "above50": 0, "new_highs": 0, "ready": False, "top": []}
     get = getter or fetch_text
 
     def one(symbol: str) -> dict | None:
@@ -654,18 +618,17 @@ def load_macro_breadth(index_id: str, getter=None) -> dict:
             candles = fetch_candles(symbol, interval="1d", span="6mo", getter=get)
         except Exception:
             return None
-        closes = [float(c["close"]) for c in candles if isinstance(c.get("close"), (int, float)) and not isinstance(c.get("close"), bool)]
+        closes = [float(c["close"]) for c in candles if isinstance(c.get("close"), (int, float))]
         if len(closes) < BREADTH_SMA_PERIOD + 1 or len(candles) < 2:
             return None
         average = sma(closes, BREADTH_SMA_PERIOD)
         if average is None:
             return None
-        new_high, new_low = session_extreme(candles[-1], candles[-2])
+        last, previous = candles[-1], candles[-2]
         return {
             "symbol": symbol,
             "above50": closes[-1] > average,
-            "new_high": new_high,
-            "new_low": new_low,
+            "new_high": bool(isinstance(last.get("high"), (int, float)) and isinstance(previous.get("high"), (int, float)) and float(last["high"]) > float(previous["high"])),
         }
 
     if getter is None and len(symbols) > 1:
@@ -679,7 +642,7 @@ def load_macro_breadth(index_id: str, getter=None) -> dict:
     for position, item in enumerate(per_symbol[:8]):
         if item is None:
             continue
-        top.append({"name": names[position] if position < len(names) else item["symbol"], "symbol": item["symbol"], "above50": item["above50"], "new_high": item["new_high"], "new_low": item["new_low"]})
+        top.append({"name": names[position] if position < len(names) else item["symbol"], "symbol": item["symbol"], "above50": item["above50"], "new_high": item["new_high"]})
     summary["top"] = top
     return summary
 
@@ -827,18 +790,6 @@ def render_red_folder_list(calendar: dict | None, index_id: str) -> None:
 # Top index strip (spec 3.1) and index pages (spec 3.3)
 # ---------------------------------------------------------------------------
 
-def _breadth_gauge(label: str, count: str, pct: float, colour: str, title: str) -> str:
-    """One thin breadth gauge: label, count and a bar. A positive count keeps a visible sliver."""
-    width = 0.0 if pct <= 0 else max(pct, 3.0)
-    return (
-        f'<div class="md-gauge" title="{html.escape(title)}">'
-        f'<span class="md-gauge-label">{html.escape(label)}</span>'
-        f'<span class="md-gauge-num">{html.escape(count)}</span>'
-        f'<div class="md-gauge-track"><div class="md-gauge-fill" style="width:{width:.0f}%;background:{colour}"></div></div>'
-        f"</div>"
-    )
-
-
 def _strip_card(item: dict, data: dict, active: bool) -> str:
     label = item["label"]
     if not data.get("available"):
@@ -855,17 +806,16 @@ def _strip_card(item: dict, data: dict, active: bool) -> str:
             listed = int(breadth.get("listed") or 0)
             above = int(breadth.get("above50") or 0)
             highs = int(breadth.get("new_highs") or 0)
-            lows = int(breadth.get("new_lows") or 0)
             above_pct = (above / listed * 100) if listed else 0
             high_pct = (highs / listed * 100) if listed else 0
-            low_pct = (lows / listed * 100) if listed else 0
             above_colour = "#15803d" if above_pct >= 50 else "#b42318"
             gauges = (
-                '<div class="md-gauges">'
-                + _breadth_gauge("50MA", f"{above}/{listed}", above_pct, above_colour, "Constituents above their 50-day moving average")
-                + _breadth_gauge("Highs", f"{highs}/{listed}", high_pct, "#2563eb", "Constituents making a new high vs the previous day")
-                + _breadth_gauge("Lows", f"{lows}/{listed}", low_pct, "#b42318", "Constituents making a new low vs the previous day")
-                + "</div>"
+                f'<div><span class="md-gauge-label" title="Constituents whose latest close is above their 50-day moving average">50MA</span> '
+                f'<span class="md-gauge-num" style="float:right">{above}/{listed}</span></div>'
+                f'<div class="md-gauge-track"><div class="md-gauge-fill" style="width:{above_pct:.0f}%;background:{above_colour}"></div></div>'
+                f'<div><span class="md-gauge-label" title="Constituents whose current session high exceeds the previous session high">Highs</span> '
+                f'<span class="md-gauge-num" style="float:right">{highs}/{listed}</span></div>'
+                f'<div class="md-gauge-track"><div class="md-gauge-fill" style="width:{high_pct:.0f}%;background:#2563eb"></div></div>'
             )
         else:
             gauges = '<div class="md-gauge-label">Breadth unavailable — not enough constituent quotes published.</div>'
@@ -1139,29 +1089,20 @@ def render_index_page(index_id: str, data: dict, calendar: dict | None) -> None:
         listed = int(breadth.get("listed") or 0)
         above = int(breadth.get("above50") or 0)
         highs = int(breadth.get("new_highs") or 0)
-        lows = int(breadth.get("new_lows") or 0)
         above_pct = (above / listed * 100) if listed else 0
         high_pct = (highs / listed * 100) if listed else 0
-        low_pct = (lows / listed * 100) if listed else 0
         st.markdown(f"Above 50-day MA <span class='md-breadth-num' style='float:right'>{above} / {listed}</span>", unsafe_allow_html=True)
         st.markdown(f'<div class="md-gauge-track" style="height:10px"><div class="md-gauge-fill" style="width:{above_pct:.0f}%;background:#2563eb"></div></div>', unsafe_allow_html=True)
         st.markdown(f"New highs vs previous day <span class='md-breadth-num' style='float:right'>{highs} / {listed}</span>", unsafe_allow_html=True)
         st.markdown(f'<div class="md-gauge-track" style="height:10px"><div class="md-gauge-fill" style="width:{high_pct:.0f}%;background:#15803d"></div></div>', unsafe_allow_html=True)
-        st.markdown(f"New lows vs previous day <span class='md-breadth-num' style='float:right'>{lows} / {listed}</span>", unsafe_allow_html=True)
-        st.markdown(f'<div class="md-gauge-track" style="height:10px"><div class="md-gauge-fill" style="width:{low_pct:.0f}%;background:#b42318"></div></div>', unsafe_allow_html=True)
-        st.caption(f"Coverage: {breadth.get('measured')} of {listed} listed constituents measured. A constituent with no usable closes is left out of the counts.")
+        st.caption(f"Coverage: {breadth.get('measured')} of {listed} listed constituents measured. A constituent with no usable closes is left out of both counts.")
         top = breadth.get("top") or []
         if top:
             st.markdown("**Top weights**")
             st.caption("First constituents as listed by the source — index weights are not published by this source, so this is source order, not a weight ranking.")
             rows = []
             for entry in top:
-                rows.append({
-                    "Constituent": entry.get("name") or entry.get("symbol"),
-                    ">50MA": "●" if entry.get("above50") else "○",
-                    "New high": "●" if entry.get("new_high") else "○",
-                    "New low": "●" if entry.get("new_low") else "○",
-                })
+                rows.append({"Constituent": entry.get("name") or entry.get("symbol"), ">50MA": "●" if entry.get("above50") else "○", "New high": "●" if entry.get("new_high") else "○"})
             st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
     render_red_folder_list(calendar, index_id)
 
