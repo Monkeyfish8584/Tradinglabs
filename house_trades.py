@@ -152,6 +152,13 @@ def coverage_text(data):
         if unread:
             text += f"; {unread} not read (mostly scanned paper filings, which are not supported yet)"
         text += "."
+    paper = {}
+    for r in (data or {}).get("not_read", []):
+        if "scanned" in str(r.get("reason", "")):
+            paper[r.get("member") or "unknown"] = paper.get(r.get("member") or "unknown", 0) + 1
+    if paper:
+        top = sorted(paper.items(), key=lambda kv: (-kv[1], kv[0]))[:6]
+        text += " Not read, on paper: " + ", ".join(f"{m} ({n})" for m, n in top) + ". Their trades are missing here."
     return text
 
 

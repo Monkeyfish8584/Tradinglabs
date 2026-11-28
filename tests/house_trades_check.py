@@ -48,6 +48,14 @@ def test_amounts():
     assert h.parse_amount("") == (None, None)
 
 
+def test_coverage_names_members_with_unread_paper_filings():
+    data = {"generated_at": "2026-11-28T00:00:00", "coverage": {"filings_seen": 5, "parsed": 2, "not_read": 3},
+            "not_read": [{"member": "A B", "reason": "scanned paper filing"}, {"member": "A B", "reason": "scanned paper filing"},
+                         {"member": "C D", "reason": "scanned paper filing"}, {"member": "E F", "reason": "no trade rows found"}]}
+    text = h.coverage_text(data)
+    assert "A B (2), C D (1)" in text and "E F" not in text
+
+
 def test_scanned_flag():
     # a PDF with no text layer is reported, not guessed
     r = {"scanned": True, "trades": []}
