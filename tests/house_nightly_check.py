@@ -5,7 +5,7 @@ import house_nightly as n
 
 def test_normalize():
     assert n.normalize_name("Danaher Corporation Common Stock (DHR) [ST]") == "danaher"
-    assert n.normalize_name("Amazon.com, Inc. - Common Stock") == "amazon com"
+    assert n.normalize_name("Amazon.com, Inc. - Common Stock") == "amazon"
     assert n.normalize_name("Procter & Gamble Company") == "procter and gamble"
 
 

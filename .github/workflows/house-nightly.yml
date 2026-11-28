@@ -1,0 +1,46 @@
+name: House trades nightly
+on:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+permissions:
+  contents: write
+concurrency:
+  group: house-nightly
+  cancel-in-progress: false
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install poppler
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq poppler-utils
+      - name: Get existing data (if any)
+        run: |
+          mkdir -p work
+          if git ls-remote --exit-code --heads origin house-trades-data >/dev/null 2>&1; then
+            git fetch origin house-trades-data
+            git show origin/house-trades-data:house_trades.json > work/house_trades.json
+          fi
+      - name: Read new filings
+        id: run
+        env:
+          DATA_FILE: work/house_trades.json
+        run: python3 scripts/house_nightly.py
+        continue-on-error: true
+      - name: Publish data branch
+        run: |
+          test -f work/house_trades.json || { echo "no data file produced"; exit 1; }
+          cp work/house_trades.json /tmp/house_trades.json
+          git config user.name "house-trades-bot"
+          git config user.email "house-trades-bot@users.noreply.github.com"
+          git checkout --orphan house-trades-data-new
+          git rm -rf . >/dev/null 2>&1 || true
+          cp /tmp/house_trades.json house_trades.json
+          git add house_trades.json
+          git commit -qm "House trades data $(date -u +%F)"
+          git push -f origin house-trades-data-new:house-trades-data
+      - name: Fail if the read step failed
+        if: steps.run.outcome == 'failure'
+        run: exit 1
