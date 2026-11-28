@@ -1,0 +1,16 @@
+# Python development
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Local secrets
+.env
+.env.*
+!.env.example
+.streamlit/secrets.toml
+
+# Operating system files
+.DS_Store
+Thumbs.db

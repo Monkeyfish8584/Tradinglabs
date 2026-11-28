@@ -1,0 +1,889 @@
+{
+  "year": 2025,
+  "requests": [
+    {
+      "url": "https://disclosures-clerk.house.gov/public_disc/financial-pdfs/2025FD.ZIP",
+      "status": 200,
+      "bytes": 107497,
+      "type": "application/x-zip-compressed"
+    },
+    {
+      "url": "https://disclosures-clerk.house.gov/public_disc/ptr-pdfs/2025/20026489.pdf",
+      "status": 200,
+      "bytes": 61956,
+      "type": "application/pdf"
+    },
+    {
+      "url": "https://disclosures-clerk.house.gov/public_disc/ptr-pdfs/2025/20030810.pdf",
+      "status": 200,
+      "bytes": 62069,
+      "type": "application/pdf"
+    },
+    {
+      "url": "https://disclosures-clerk.house.gov/public_disc/ptr-pdfs/2025/20030600.pdf",
+      "status": 200,
+      "bytes": 63857,
+      "type": "application/pdf"
+    },
+    {
+      "url": "https://disclosures-clerk.house.gov/public_disc/ptr-pdfs/2025/20030673.pdf",
+      "status": 200,
+      "bytes": 66841,
+      "type": "application/pdf"
+    },
+    {
+      "url": "https://disclosures-clerk.house.gov/public_disc/ptr-pdfs/2025/20030544.pdf",
+      "status": 200,
+      "bytes": 66355,
+      "type": "application/pdf"
+    },
+    {
+      "url": "https://disclosures-clerk.house.gov/public_disc/ptr-pdfs/2025/20030212.pdf",
+      "status": 200,
+      "bytes": 85846,
+      "type": "application/pdf"
+    },
+    {
+      "url": "https://disclosures-clerk.house.gov/public_disc/ptr-pdfs/2025/20032191.pdf",
+      "status": 200,
+      "bytes": 66455,
+      "type": "application/pdf"
+    },
+    {
+      "url": "https://disclosures-clerk.house.gov/public_disc/ptr-pdfs/2025/20033619.pdf",
+      "status": 200,
+      "bytes": 252075,
+      "type": "application/pdf"
+    },
+    {
+      "url": "https://disclosures-clerk.house.gov/public_disc/ptr-pdfs/2025/20030155.pdf",
+      "status": 200,
+      "bytes": 67327,
+      "type": "application/pdf"
+    },
+    {
+      "url": "https://disclosures-clerk.house.gov/public_disc/ptr-pdfs/2025/20030594.pdf",
+      "status": 200,
+      "bytes": 65747,
+      "type": "application/pdf"
+    },
+    {
+      "url": "https://disclosures-clerk.house.gov/public_disc/ptr-pdfs/2025/20030283.pdf",
+      "status": 200,
+      "bytes": 72857,
+      "type": "application/pdf"
+    },
+    {
+      "url": "https://disclosures-clerk.house.gov/public_disc/ptr-pdfs/2025/20030296.pdf",
+      "status": 200,
+      "bytes": 203212,
+      "type": "application/pdf"
+    },
+    {
+      "url": "https://disclosures-clerk.house.gov/public_disc/ptr-pdfs/2025/20033670.pdf",
+      "status": 200,
+      "bytes": 67652,
+      "type": "application/pdf"
+    },
+    {
+      "url": "https://disclosures-clerk.house.gov/public_disc/ptr-pdfs/2025/20028002.pdf",
+      "status": 200,
+      "bytes": 73607,
+      "type": "application/pdf"
+    },
+    {
+      "url": "https://disclosures-clerk.house.gov/public_disc/ptr-pdfs/2025/20033699.pdf",
+      "status": 200,
+      "bytes": 67657,
+      "type": "application/pdf"
+    },
+    {
+      "url": "https://disclosures-clerk.house.gov/public_disc/ptr-pdfs/2025/20033431.pdf",
+      "status": 200,
+      "bytes": 63192,
+      "type": "application/pdf"
+    },
+    {
+      "url": "https://disclosures-clerk.house.gov/public_disc/ptr-pdfs/2025/20033691.pdf",
+      "status": 200,
+      "bytes": 62818,
+      "type": "application/pdf"
+    },
+    {
+      "url": "https://disclosures-clerk.house.gov/public_disc/ptr-pdfs/2025/20026736.pdf",
+      "status": 200,
+      "bytes": 65496,
+      "type": "application/pdf"
+    },
+    {
+      "url": "https://disclosures-clerk.house.gov/public_disc/ptr-pdfs/2025/20030976.pdf",
+      "status": 200,
+      "bytes": 63688,
+      "type": "application/pdf"
+    },
+    {
+      "url": "https://disclosures-clerk.house.gov/public_disc/ptr-pdfs/2025/20030869.pdf",
+      "status": 200,
+      "bytes": 62191,
+      "type": "application/pdf"
+    },
+    {
+      "url": "https://disclosures-clerk.house.gov/public_disc/ptr-pdfs/2025/20030295.pdf",
+      "status": 200,
+      "bytes": 120054,
+      "type": "application/pdf"
+    },
+    {
+      "url": "https://disclosures-clerk.house.gov/public_disc/ptr-pdfs/2025/20032284.pdf",
+      "status": 200,
+      "bytes": 67991,
+      "type": "application/pdf"
+    },
+    {
+      "url": "https://disclosures-clerk.house.gov/public_disc/ptr-pdfs/2025/20029135.pdf",
+      "status": 200,
+      "bytes": 77922,
+      "type": "application/pdf"
+    },
+    {
+      "url": "https://disclosures-clerk.house.gov/public_disc/ptr-pdfs/2025/20030902.pdf",
+      "status": 200,
+      "bytes": 83265,
+      "type": "application/pdf"
+    },
+    {
+      "url": "https://disclosures-clerk.house.gov/public_disc/ptr-pdfs/2025/20032080.pdf",
+      "status": 200,
+      "bytes": 64969,
+      "type": "application/pdf"
+    },
+    {
+      "url": "https://disclosures-clerk.house.gov/public_disc/ptr-pdfs/2025/8220747.pdf",
+      "status": 200,
+      "bytes": 54738,
+      "type": "application/pdf"
+    },
+    {
+      "url": "https://disclosures-clerk.house.gov/public_disc/ptr-pdfs/2025/8220836.pdf",
+      "status": 200,
+      "bytes": 46549,
+      "type": "application/pdf"
+    },
+    {
+      "url": "https://disclosures-clerk.house.gov/public_disc/ptr-pdfs/2025/8221212.pdf",
+      "status": 200,
+      "bytes": 384095,
+      "type": "application/pdf"
+    },
+    {
+      "url": "https://disclosures-clerk.house.gov/public_disc/ptr-pdfs/2025/8221270.pdf",
+      "status": 200,
+      "bytes": 26700,
+      "type": "application/pdf"
+    },
+    {
+      "url": "https://disclosures-clerk.house.gov/public_disc/ptr-pdfs/2025/8220770.pdf",
+      "status": 200,
+      "bytes": 29801,
+      "type": "application/pdf"
+    },
+    {
+      "url": "https://disclosures-clerk.house.gov/public_disc/ptr-pdfs/2025/9115671.pdf",
+      "status": 200,
+      "bytes": 800786,
+      "type": "application/pdf"
+    },
+    {
+      "url": "https://disclosures-clerk.house.gov/public_disc/ptr-pdfs/2025/8220782.pdf",
+      "status": 200,
+      "bytes": 27828,
+      "type": "application/pdf"
+    },
+    {
+      "url": "https://disclosures-clerk.house.gov/public_disc/ptr-pdfs/2025/8220809.pdf",
+      "status": 200,
+      "bytes": 30011,
+      "type": "application/pdf"
+    },
+    {
+      "url": "https://disclosures-clerk.house.gov/public_disc/ptr-pdfs/2025/8221233.pdf",
+      "status": 200,
+      "bytes": 51567,
+      "type": "application/pdf"
+    },
+    {
+      "url": "https://disclosures-clerk.house.gov/public_disc/ptr-pdfs/2025/8221276.pdf",
+      "status": 200,
+      "bytes": 28740,
+      "type": "application/pdf"
+    },
+    {
+      "url": "https://disclosures-clerk.house.gov/public_disc/ptr-pdfs/2025/8220753.pdf",
+      "status": 200,
+      "bytes": 105766,
+      "type": "application/pdf"
+    },
+    {
+      "url": "https://disclosures-clerk.house.gov/public_disc/ptr-pdfs/2025/8221238.pdf",
+      "status": 200,
+      "bytes": 26349,
+      "type": "application/pdf"
+    },
+    {
+      "url": "https://disclosures-clerk.house.gov/public_disc/ptr-pdfs/2025/9115549.pdf",
+      "status": 200,
+      "bytes": 44609,
+      "type": "application/pdf"
+    },
+    {
+      "url": "https://disclosures-clerk.house.gov/public_disc/ptr-pdfs/2025/9115546.pdf",
+      "status": 200,
+      "bytes": 26348,
+      "type": "application/pdf"
+    },
+    {
+      "url": "https://disclosures-clerk.house.gov/public_disc/ptr-pdfs/2025/9115665.pdf",
+      "status": 200,
+      "bytes": 30253,
+      "type": "application/pdf"
+    }
+  ],
+  "notes": [],
+  "zip_members": [
+    "2025FD.txt",
+    "2025FD.xml"
+  ],
+  "header": [
+    "Prefix",
+    "Last",
+    "First",
+    "Suffix",
+    "FilingType",
+    "StateDst",
+    "Year",
+    "FilingDate",
+    "DocID"
+  ],
+  "total_rows": 2977,
+  "filing_type_counts": {
+    "D": 135,
+    "C": 931,
+    "W": 50,
+    "O": 432,
+    "X": 714,
+    "P": 515,
+    "A": 132,
+    "T": 53,
+    "E": 5,
+    "G": 5,
+    "H": 3,
+    "B": 2
+  },
+  "ptr_count": 515,
+  "ptr_docid_length_counts": {
+    "8": 449,
+    "7": 66
+  },
+  "sample": [
+    {
+      "doc_id": "20026489",
+      "ok": true,
+      "row": {
+        "Prefix": "Hon.",
+        "Last": "Collins",
+        "First": "Michael A.",
+        "Suffix": "",
+        "FilingType": "P",
+        "StateDst": "GA10",
+        "Year": "2025",
+        "FilingDate": "1/1/2025",
+        "DocID": "20026489"
+      }
+    },
+    {
+      "doc_id": "20030810",
+      "ok": true,
+      "row": {
+        "Prefix": "Hon.",
+        "Last": "Lee",
+        "First": "Laurel",
+        "Suffix": "",
+        "FilingType": "P",
+        "StateDst": "FL15",
+        "Year": "2025",
+        "FilingDate": "8/9/2025",
+        "DocID": "20030810"
+      }
+    },
+    {
+      "doc_id": "20030600",
+      "ok": true,
+      "row": {
+        "Prefix": "Hon.",
+        "Last": "Wasserman Schultz",
+        "First": "Debbie",
+        "Suffix": "",
+        "FilingType": "P",
+        "StateDst": "FL25",
+        "Year": "2025",
+        "FilingDate": "7/25/2025",
+        "DocID": "20030600"
+      }
+    },
+    {
+      "doc_id": "20030673",
+      "ok": true,
+      "row": {
+        "Prefix": "Hon.",
+        "Last": "Steube",
+        "First": "Greg",
+        "Suffix": "",
+        "FilingType": "P",
+        "StateDst": "FL17",
+        "Year": "2025",
+        "FilingDate": "7/16/2025",
+        "DocID": "20030673"
+      }
+    },
+    {
+      "doc_id": "20030544",
+      "ok": true,
+      "row": {
+        "Prefix": "Hon.",
+        "Last": "Sessions",
+        "First": "Pete",
+        "Suffix": "",
+        "FilingType": "P",
+        "StateDst": "TX17",
+        "Year": "2025",
+        "FilingDate": "6/21/2025",
+        "DocID": "20030544"
+      }
+    },
+    {
+      "doc_id": "20030212",
+      "ok": true,
+      "row": {
+        "Prefix": "Hon.",
+        "Last": "Bresnahan",
+        "First": "Rob",
+        "Suffix": "",
+        "FilingType": "P",
+        "StateDst": "PA08",
+        "Year": "2025",
+        "FilingDate": "4/22/2025",
+        "DocID": "20030212"
+      }
+    },
+    {
+      "doc_id": "20032191",
+      "ok": true,
+      "row": {
+        "Prefix": "Hon.",
+        "Last": "Dunn",
+        "First": "Neal Patrick MD, Facs",
+        "Suffix": "",
+        "FilingType": "P",
+        "StateDst": "FL02",
+        "Year": "2025",
+        "FilingDate": "10/1/2025",
+        "DocID": "20032191"
+      }
+    },
+    {
+      "doc_id": "20033619",
+      "ok": true,
+      "row": {
+        "Prefix": "Hon.",
+        "Last": "Cisneros",
+        "First": "Gilbert",
+        "Suffix": "",
+        "FilingType": "P",
+        "StateDst": "CA31",
+        "Year": "2025",
+        "FilingDate": "12/15/2025",
+        "DocID": "20033619"
+      }
+    },
+    {
+      "doc_id": "20030155",
+      "ok": true,
+      "row": {
+        "Prefix": "Hon.",
+        "Last": "Kean",
+        "First": "Thomas H.",
+        "Suffix": "Jr",
+        "FilingType": "P",
+        "StateDst": "NJ07",
+        "Year": "2025",
+        "FilingDate": "4/18/2025",
+        "DocID": "20030155"
+      }
+    },
+    {
+      "doc_id": "20030594",
+      "ok": true,
+      "row": {
+        "Prefix": "Hon.",
+        "Last": "Schneider",
+        "First": "Bradley S.",
+        "Suffix": "",
+        "FilingType": "P",
+        "StateDst": "IL10",
+        "Year": "2025",
+        "FilingDate": "7/2/2025",
+        "DocID": "20030594"
+      }
+    },
+    {
+      "doc_id": "20030283",
+      "ok": true,
+      "row": {
+        "Prefix": "Hon.",
+        "Last": "Jackson",
+        "First": "Jonathan",
+        "Suffix": "",
+        "FilingType": "P",
+        "StateDst": "IL01",
+        "Year": "2025",
+        "FilingDate": "5/13/2025",
+        "DocID": "20030283"
+      }
+    },
+    {
+      "doc_id": "20030296",
+      "ok": true,
+      "row": {
+        "Prefix": "Hon.",
+        "Last": "Johnson",
+        "First": "Julie",
+        "Suffix": "",
+        "FilingType": "P",
+        "StateDst": "TX32",
+        "Year": "2025",
+        "FilingDate": "5/14/2025",
+        "DocID": "20030296"
+      }
+    },
+    {
+      "doc_id": "20033670",
+      "ok": true,
+      "row": {
+        "Prefix": "Hon.",
+        "Last": "Moore",
+        "First": "Tim",
+        "Suffix": "",
+        "FilingType": "P",
+        "StateDst": "NC14",
+        "Year": "2025",
+        "FilingDate": "12/19/2025",
+        "DocID": "20033670"
+      }
+    },
+    {
+      "doc_id": "20028002",
+      "ok": true,
+      "row": {
+        "Prefix": "Hon.",
+        "Last": "Greene",
+        "First": "Marjorie Taylor",
+        "Suffix": "",
+        "FilingType": "P",
+        "StateDst": "GA14",
+        "Year": "2025",
+        "FilingDate": "3/19/2025",
+        "DocID": "20028002"
+      }
+    },
+    {
+      "doc_id": "20033699",
+      "ok": true,
+      "row": {
+        "Prefix": "Hon.",
+        "Last": "Shreve",
+        "First": "Jefferson",
+        "Suffix": "",
+        "FilingType": "P",
+        "StateDst": "IN06",
+        "Year": "2025",
+        "FilingDate": "12/30/2025",
+        "DocID": "20033699"
+      }
+    },
+    {
+      "doc_id": "20033431",
+      "ok": true,
+      "row": {
+        "Prefix": "Hon.",
+        "Last": "DelBene",
+        "First": "Suzan K.",
+        "Suffix": "",
+        "FilingType": "P",
+        "StateDst": "WA01",
+        "Year": "2025",
+        "FilingDate": "11/12/2025",
+        "DocID": "20033431"
+      }
+    },
+    {
+      "doc_id": "20033691",
+      "ok": true,
+      "row": {
+        "Prefix": "Hon.",
+        "Last": "Case",
+        "First": "Ed",
+        "Suffix": "",
+        "FilingType": "P",
+        "StateDst": "HI01",
+        "Year": "2025",
+        "FilingDate": "12/24/2025",
+        "DocID": "20033691"
+      }
+    },
+    {
+      "doc_id": "20026736",
+      "ok": true,
+      "row": {
+        "Prefix": "Hon.",
+        "Last": "Joyce",
+        "First": "David P.",
+        "Suffix": "",
+        "FilingType": "P",
+        "StateDst": "OH14",
+        "Year": "2025",
+        "FilingDate": "2/7/2025",
+        "DocID": "20026736"
+      }
+    },
+    {
+      "doc_id": "20030976",
+      "ok": true,
+      "row": {
+        "Prefix": "Hon.",
+        "Last": "Auchincloss",
+        "First": "Jake",
+        "Suffix": "",
+        "FilingType": "P",
+        "StateDst": "MA04",
+        "Year": "2025",
+        "FilingDate": "8/27/2025",
+        "DocID": "20030976"
+      }
+    },
+    {
+      "doc_id": "20030869",
+      "ok": true,
+      "row": {
+        "Prefix": "Hon.",
+        "Last": "Thanedar",
+        "First": "Shri",
+        "Suffix": "",
+        "FilingType": "P",
+        "StateDst": "MI13",
+        "Year": "2025",
+        "FilingDate": "8/11/2025",
+        "DocID": "20030869"
+      }
+    },
+    {
+      "doc_id": "20030295",
+      "ok": true,
+      "row": {
+        "Prefix": "Hon.",
+        "Last": "Greene",
+        "First": "Marjorie Taylor",
+        "Suffix": "",
+        "FilingType": "P",
+        "StateDst": "GA14",
+        "Year": "2025",
+        "FilingDate": "5/6/2025",
+        "DocID": "20030295"
+      }
+    },
+    {
+      "doc_id": "20032284",
+      "ok": true,
+      "row": {
+        "Prefix": "Hon.",
+        "Last": "Hern",
+        "First": "Kevin",
+        "Suffix": "",
+        "FilingType": "P",
+        "StateDst": "OK01",
+        "Year": "2025",
+        "FilingDate": "10/16/2025",
+        "DocID": "20032284"
+      }
+    },
+    {
+      "doc_id": "20029135",
+      "ok": true,
+      "row": {
+        "Prefix": "Hon.",
+        "Last": "Miller",
+        "First": "Carol Devine",
+        "Suffix": "",
+        "FilingType": "P",
+        "StateDst": "WV01",
+        "Year": "2025",
+        "FilingDate": "4/11/2025",
+        "DocID": "20029135"
+      }
+    },
+    {
+      "doc_id": "20030902",
+      "ok": true,
+      "row": {
+        "Prefix": "Hon.",
+        "Last": "Scott",
+        "First": "Austin",
+        "Suffix": "",
+        "FilingType": "P",
+        "StateDst": "GA08",
+        "Year": "2025",
+        "FilingDate": "8/13/2025",
+        "DocID": "20030902"
+      }
+    },
+    {
+      "doc_id": "20032080",
+      "ok": true,
+      "row": {
+        "Prefix": "Hon.",
+        "Last": "Sessions",
+        "First": "Pete",
+        "Suffix": "",
+        "FilingType": "P",
+        "StateDst": "TX17",
+        "Year": "2025",
+        "FilingDate": "9/15/2025",
+        "DocID": "20032080"
+      }
+    },
+    {
+      "doc_id": "8220747",
+      "ok": true,
+      "row": {
+        "Prefix": "Hon.",
+        "Last": "Bilirakis",
+        "First": "Gus M.",
+        "Suffix": "",
+        "FilingType": "P",
+        "StateDst": "FL12",
+        "Year": "2025",
+        "FilingDate": "2/6/2025",
+        "DocID": "8220747"
+      }
+    },
+    {
+      "doc_id": "8220836",
+      "ok": true,
+      "row": {
+        "Prefix": "Hon.",
+        "Last": "Wagner",
+        "First": "Ann",
+        "Suffix": "",
+        "FilingType": "P",
+        "StateDst": "MO02",
+        "Year": "2025",
+        "FilingDate": "4/16/2025",
+        "DocID": "8220836"
+      }
+    },
+    {
+      "doc_id": "8221212",
+      "ok": true,
+      "row": {
+        "Prefix": "Hon.",
+        "Last": "McClain",
+        "First": "Lisa",
+        "Suffix": "",
+        "FilingType": "P",
+        "StateDst": "MI09",
+        "Year": "2025",
+        "FilingDate": "10/23/2025",
+        "DocID": "8221212"
+      }
+    },
+    {
+      "doc_id": "8221270",
+      "ok": true,
+      "row": {
+        "Prefix": "Hon.",
+        "Last": "Rogers",
+        "First": "Harold Dallas",
+        "Suffix": "",
+        "FilingType": "P",
+        "StateDst": "KY05",
+        "Year": "2025",
+        "FilingDate": "12/11/2025",
+        "DocID": "8221270"
+      }
+    },
+    {
+      "doc_id": "8220770",
+      "ok": true,
+      "row": {
+        "Prefix": "Hon.",
+        "Last": "Sherman",
+        "First": "Brad",
+        "Suffix": "",
+        "FilingType": "P",
+        "StateDst": "CA32",
+        "Year": "2025",
+        "FilingDate": "2/25/2025",
+        "DocID": "8220770"
+      }
+    },
+    {
+      "doc_id": "9115671",
+      "ok": true,
+      "row": {
+        "Prefix": "Hon.",
+        "Last": "Khanna",
+        "First": "Rohit",
+        "Suffix": "",
+        "FilingType": "P",
+        "StateDst": "CA17",
+        "Year": "2025",
+        "FilingDate": "8/7/2025",
+        "DocID": "9115671"
+      }
+    },
+    {
+      "doc_id": "8220782",
+      "ok": true,
+      "row": {
+        "Prefix": "Hon.",
+        "Last": "Rogers",
+        "First": "Harold Dallas",
+        "Suffix": "",
+        "FilingType": "P",
+        "StateDst": "KY05",
+        "Year": "2025",
+        "FilingDate": "3/6/2025",
+        "DocID": "8220782"
+      }
+    },
+    {
+      "doc_id": "8220809",
+      "ok": true,
+      "row": {
+        "Prefix": "Hon.",
+        "Last": "Gonzalez",
+        "First": "Vicente",
+        "Suffix": "",
+        "FilingType": "P",
+        "StateDst": "TX34",
+        "Year": "2025",
+        "FilingDate": "3/31/2025",
+        "DocID": "8220809"
+      }
+    },
+    {
+      "doc_id": "8221233",
+      "ok": true,
+      "row": {
+        "Prefix": "",
+        "Last": "Wied",
+        "First": "Tony",
+        "Suffix": "",
+        "FilingType": "P",
+        "StateDst": "WI08",
+        "Year": "2025",
+        "FilingDate": "11/10/2025",
+        "DocID": "8221233"
+      }
+    },
+    {
+      "doc_id": "8221276",
+      "ok": true,
+      "row": {
+        "Prefix": "Hon.",
+        "Last": "Malliotakis",
+        "First": "Nicole",
+        "Suffix": "",
+        "FilingType": "P",
+        "StateDst": "NY11",
+        "Year": "2025",
+        "FilingDate": "12/19/2025",
+        "DocID": "8221276"
+      }
+    },
+    {
+      "doc_id": "8220753",
+      "ok": true,
+      "row": {
+        "Prefix": "Hon.",
+        "Last": "Fleischmann",
+        "First": "Charles J. \"Chuck\"",
+        "Suffix": "",
+        "FilingType": "P",
+        "StateDst": "TN03",
+        "Year": "2025",
+        "FilingDate": "2/10/2025",
+        "DocID": "8220753"
+      }
+    },
+    {
+      "doc_id": "8221238",
+      "ok": true,
+      "row": {
+        "Prefix": "Hon.",
+        "Last": "Smith",
+        "First": "Adrian",
+        "Suffix": "",
+        "FilingType": "P",
+        "StateDst": "NE03",
+        "Year": "2025",
+        "FilingDate": "11/14/2025",
+        "DocID": "8221238"
+      }
+    },
+    {
+      "doc_id": "9115549",
+      "ok": true,
+      "row": {
+        "Prefix": "Hon.",
+        "Last": "Smith",
+        "First": "Adrian",
+        "Suffix": "",
+        "FilingType": "P",
+        "StateDst": "NE03",
+        "Year": "2025",
+        "FilingDate": "7/24/2025",
+        "DocID": "9115549"
+      }
+    },
+    {
+      "doc_id": "9115546",
+      "ok": true,
+      "row": {
+        "Prefix": "Hon.",
+        "Last": "Rogers",
+        "First": "Harold Dallas",
+        "Suffix": "",
+        "FilingType": "P",
+        "StateDst": "KY05",
+        "Year": "2025",
+        "FilingDate": "7/23/2025",
+        "DocID": "9115546"
+      }
+    },
+    {
+      "doc_id": "9115665",
+      "ok": true,
+      "row": {
+        "Prefix": "",
+        "Last": "Wied",
+        "First": "Tony",
+        "Suffix": "",
+        "FilingType": "P",
+        "StateDst": "WI08",
+        "Year": "2025",
+        "FilingDate": "8/6/2025",
+        "DocID": "9115665"
+      }
+    }
+  ]
+}
