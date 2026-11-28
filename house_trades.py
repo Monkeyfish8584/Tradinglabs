@@ -113,3 +113,51 @@ def parse_pdf(path):
         return {"filing_id": None, "trades": [], "warnings": ["no text layer (scanned)"],
                 "scanned": True}
     return parse_ptr_text(text)
+
+
+# ---------------------------------------------------------------------------
+# Reading the nightly data file (used by the stock page)
+# ---------------------------------------------------------------------------
+DATA_URL = "https://raw.githubusercontent.com/Monkeyfish8584/tradinglabs/house-trades-data/house_trades.json"
+_LINK_PREFIX = "https://disclosures-clerk.house.gov/public_disc/"
+
+
+def _norm_ticker(t):
+    return re.sub(r"[.\-]", "", (t or "").upper())
+
+
+def trades_for_ticker(data, ticker, today):
+    """Stock trades for one ticker, newest first. Each row gets 'future' if its date is after today."""
+    want = _norm_ticker(ticker)
+    rows = [dict(t) for t in (data or {}).get("trades", [])
+            if t.get("asset_code") == "ST" and t.get("ticker") and _norm_ticker(t["ticker"]) == want]
+    for r in rows:
+        r["future"] = r["traded"] > today.isoformat()
+    rows.sort(key=lambda r: (r["traded"], r["filed"]), reverse=True)
+    return rows
+
+
+def safe_link(url):
+    return url if isinstance(url, str) and url.startswith(_LINK_PREFIX) else None
+
+
+def coverage_text(data):
+    c = (data or {}).get("coverage") or {}
+    seen = c.get("filings_seen")
+    parsed, unread = c.get("parsed"), c.get("not_read")
+    day = str((data or {}).get("generated_at") or "")[:10] or "unknown date"
+    text = f"House only. Data to {day}."
+    if seen is not None and parsed is not None:
+        text += f" {parsed} of {seen} trade filings read"
+        if unread:
+            text += f"; {unread} not read (mostly scanned paper filings, which are not supported yet)"
+        text += "."
+    return text
+
+
+def amount_text(low, high):
+    if low is None:
+        return "—"
+    if high is None:
+        return f"Over ${low:,}"
+    return f"${low:,} – ${high:,}"

@@ -694,6 +694,58 @@ def test_watchlist_delete_is_a_link_at_the_end_of_each_row_and_removes_the_stock
     assert "remove" not in at2.query_params
 
 
+def test_house_trades_table_shows_matches_coverage_and_the_unavailable_state() -> None:
+    import house_trades as ht
+    from datetime import date as _d
+
+    data = {
+        "generated_at": "2026-11-28T03:00:00+00:00",
+        "coverage": {"filings_seen": 10, "parsed": 8, "not_read": 2},
+        "trades": [
+            {"asset_code": "ST", "ticker": "BRK-B", "traded": "2026-05-01", "filed": "2026-05-10", "member": "A <b>X</b>", "district": "TX01", "owner": "Self", "type": "buy", "amount_low": 1001, "amount_high": 15000, "late": False, "link": "https://disclosures-clerk.house.gov/public_disc/ptr-pdfs/2026/1.pdf"},
+            {"asset_code": "ST", "ticker": "NVDA", "traded": "2026-12-26", "filed": "2026-02-09", "member": "B", "district": "CA01", "owner": "Spouse", "type": "sell", "amount_low": 50000001, "amount_high": None, "late": True, "link": "javascript:alert(1)"},
+            {"asset_code": "CT", "ticker": "NVDA", "traded": "2026-01-01", "filed": "2026-01-02", "member": "C", "district": "CA02", "owner": "Self", "type": "buy", "amount_low": 1, "amount_high": 2, "late": False, "link": ""},
+        ],
+    }
+    rows = ht.trades_for_ticker(data, "BRK.B", _d(2026, 11, 28))
+    assert [r["member"] for r in rows] == ["A <b>X</b>"]
+    nv = ht.trades_for_ticker(data, "nvda", _d(2026, 11, 28))
+    assert len(nv) == 1 and nv[0]["future"] is True  # crypto/other asset rows never appear on stock pages
+    assert ht.safe_link(nv[0]["link"]) is None and ht.safe_link(rows[0]["link"])
+    assert ht.amount_text(50000001, None) == "Over $50,000,001"
+    assert "8 of 10" in ht.coverage_text(data) and "2 not read" in ht.coverage_text(data)
+
+    from streamlit.testing.v1 import AppTest
+
+    def app() -> None:
+        import json as _j, os, sys
+
+        sys.path.insert(0, os.environ["TL_ROOT"])
+        import research_desk_page as page
+
+        page.cached_house_data = lambda: _j.loads(os.environ["TL_HOUSE"]) if os.environ.get("TL_HOUSE") else None
+        page._render_government_block(os.environ["TL_TICKER"])
+
+    import json, os
+
+    os.environ["TL_ROOT"] = str(ROOT)
+    os.environ["TL_TICKER"] = "BRK-B"
+    os.environ["TL_HOUSE"] = json.dumps(data)
+    at = AppTest.from_function(app)
+    at.run(timeout=60)
+    assert not at.exception
+    body = " ".join(m.value for m in at.markdown) + " ".join(c.value for c in at.caption)
+    assert "&lt;b&gt;X&lt;/b&gt;" in body and "<b>X</b>" not in body and "8 of 10" in body
+
+    os.environ["TL_TICKER"] = "AAPL"
+    at = AppTest.from_function(app); at.run(timeout=60)
+    assert any("No House trades found for AAPL" in c.value for c in at.caption)
+
+    os.environ["TL_HOUSE"] = ""
+    at = AppTest.from_function(app); at.run(timeout=60)
+    assert any("unavailable right now" in c.value for c in at.caption)
+
+
 def test_dark_and_light_themes_style_the_sidebar_and_buttons() -> None:
     from research_desk_page import MACRO_THEME_CSS
 
@@ -737,5 +789,6 @@ if __name__ == "__main__":
     test_seasonality_figure_bridges_gaps_and_counts_months_beating_average()
     test_free_feed_sentiment_scores_headlines_and_hides_x()
     test_watchlist_delete_is_a_link_at_the_end_of_each_row_and_removes_the_stock()
+    test_house_trades_table_shows_matches_coverage_and_the_unavailable_state()
     test_dark_and_light_themes_style_the_sidebar_and_buttons()
     print("Macro Desk checks passed.")

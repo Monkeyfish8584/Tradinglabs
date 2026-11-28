@@ -16,7 +16,7 @@ is a macro-first dashboard for equity index traders:
   analyst target + upside/downside, 50MA, 200MA, weekly, daily,
   forward P/E, and a sentiment score when one has been saved.
 - A stock page: price and trend, imported sentiment, news, US insider
-  filings from SEC Form 4, and a government-trades note.
+  filings from SEC Form 4, and US House members' trades.
 - An index seasonality card from published daily closes, plus a
   sentiment card. X posts come only from a confirmed Grok import.
 
@@ -27,8 +27,8 @@ RSS for index news, Stock Analysis for analyst targets / forward P/E.
 A figure stays blank when its source does not publish it; nothing is
 invented. There is no Thesis box, no CANSLIM, no spider and no
 short-squeeze checks. US insider rows are SEC Form 4 filings. A
-sentiment number is shown only after a confirmed import. Government
-trades stay blank until a filings feed is connected.
+sentiment number is shown only after a confirmed import. House trades come from the nightly House Clerk file and show
+its coverage; Senate trades are not included yet.
 
 Calculation defaults (spec section 4, unconfirmed by the user, all in
 one config place at the top of this file):
@@ -60,6 +60,8 @@ from zoneinfo import ZoneInfo
 
 import pandas as pd
 import streamlit as st
+
+import house_trades
 
 from macro_desk_insights import (
     fetch_bluesky_posts,
@@ -1848,12 +1850,66 @@ def _render_insider_block(ticker: str) -> None:
     )
 
 
+@st.cache_data(ttl=21600, show_spinner=False)
+def cached_house_data() -> dict | None:
+    """The nightly House trades file, or None when it cannot be read."""
+    import urllib.request
+
+    try:
+        req = urllib.request.Request(house_trades.DATA_URL, headers={"User-Agent": "tradinglabs-macro-desk"})
+        with urllib.request.urlopen(req, timeout=20) as response:
+            data = json.loads(response.read().decode("utf-8"))
+        return data if isinstance(data, dict) and "trades" in data else None
+    except Exception:
+        return None
+
+
 def _render_government_block(ticker: str) -> None:
     st.markdown("### Government officials’ trades")
-    if sec_symbol(ticker) is not None:
-        st.caption("US officials’ trades are disclosed in value ranges, often days to weeks after the trade. No filings feed is connected, so this table stays empty rather than showing sample names.")
+    if sec_symbol(ticker) is None:
+        st.caption("US officials’ trades are only disclosed for US-listed stocks. Other countries publish interests differently, and this desk does not show those as trades.")
         return
-    st.caption("US officials’ trades are only disclosed for US-listed stocks. Other countries publish interests differently, and this desk does not show those as trades.")
+    data = cached_house_data()
+    if data is None:
+        st.caption("House trades are unavailable right now. This is not the same as there being no trades.")
+        return
+    rows = house_trades.trades_for_ticker(data, ticker, _london_today())
+    st.caption(
+        house_trades.coverage_text(data)
+        + " Amounts are disclosed as ranges. Trades can be filed up to 45 days late, so recent trades may be missing."
+    )
+    if not rows:
+        st.caption(f"No House trades found for {ticker} in the filings we could read.")
+        return
+    shown = rows[:50]
+    body = []
+    for r in shown:
+        flags = []
+        if r.get("late"):
+            flags.append("late")
+        if r.get("future"):
+            flags.append("date looks wrong")
+        link = house_trades.safe_link(r.get("link"))
+        filing = f'<a href="{html.escape(link, quote=True)}" target="_blank" rel="noopener">Filing</a>' if link else "—"
+        body.append(
+            "<tr>"
+            f"<td>{html.escape(str(r.get('traded') or '—'))}</td>"
+            f"<td>{html.escape(str(r.get('filed') or '—'))}</td>"
+            f"<td>{html.escape(str(r.get('member') or '—'))} ({html.escape(str(r.get('district') or '—'))})</td>"
+            f"<td>{html.escape(str(r.get('owner') or '—'))}</td>"
+            f"<td>{html.escape(str(r.get('type') or '—').capitalize())}</td>"
+            f"<td class='md-mono'>{html.escape(house_trades.amount_text(r.get('amount_low'), r.get('amount_high')))}</td>"
+            f"<td>{html.escape(', '.join(flags)) or '—'}</td>"
+            f"<td>{filing}</td>"
+            "</tr>"
+        )
+    header = "<tr><th>Traded</th><th>Filed</th><th>Member</th><th>Owner</th><th>Type</th><th>Amount</th><th>Flags</th><th>Source</th></tr>"
+    st.markdown(
+        _macro_css(_current_theme()) + f'<div style="overflow-x:auto"><table class="md-watchlist">{header}{"".join(body)}</table></div>',
+        unsafe_allow_html=True,
+    )
+    if len(rows) > len(shown):
+        st.caption(f"Showing the latest {len(shown)} of {len(rows)} trades.")
 
 
 def _render_stock_page(ticker: str) -> None:
