@@ -1,0 +1,28 @@
+name: House scanned-filings survey
+on:
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  survey:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install OCR tools
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq tesseract-ocr poppler-utils python3-pil
+      - name: Get data file
+        run: |
+          git fetch origin house-trades-data
+          git show origin/house-trades-data:house_trades.json > /tmp/house_trades.json
+      - name: Survey scanned filings
+        run: python3 scripts/house_scan_survey.py /tmp/house_trades.json survey_out
+      - name: Publish survey branch
+        run: |
+          git config user.name "house-survey-bot"
+          git config user.email "house-survey-bot@users.noreply.github.com"
+          git checkout --orphan house-scan-survey-data
+          git rm -rf . >/dev/null 2>&1 || true
+          git add -f survey_out
+          git commit -qm "Scanned filings survey"
+          git push -f origin house-scan-survey-data
