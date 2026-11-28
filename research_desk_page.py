@@ -62,6 +62,7 @@ import pandas as pd
 import streamlit as st
 
 import house_trades
+import insider_views
 
 from macro_desk_insights import (
     fetch_bluesky_posts,
@@ -413,7 +414,7 @@ def _clear_macro_route() -> None:
     only the route (index / stock) and keeps the theme param.
     """
     try:
-        for key in ("index", "stock"):
+        for key in ("index", "stock", "view"):
             if key in st.query_params:
                 del st.query_params[key]
     except Exception:
@@ -1987,6 +1988,151 @@ def _requested_stock() -> str | None:
         return None
 
 
+@st.cache_data(ttl=21600, show_spinner=False)
+def cached_company_buys() -> dict | None:
+    """The nightly company-insider buys file, or None when it cannot be read."""
+    import urllib.request
+
+    try:
+        req = urllib.request.Request(insider_views.COMPANY_DATA_URL, headers={"User-Agent": "tradinglabs-macro-desk"})
+        with urllib.request.urlopen(req, timeout=20) as response:
+            data = json.loads(response.read().decode("utf-8"))
+        return data if isinstance(data, dict) and "buys" in data else None
+    except Exception:
+        return None
+
+
+def _requested_view() -> str | None:
+    value = st.query_params.get("view")
+    if isinstance(value, list):
+        value = value[0] if value else None
+    return "insiders" if isinstance(value, str) and value.strip().lower() == "insiders" else None
+
+
+def _table_html(header: list[str], body: list[str]) -> str:
+    head = "".join(f"<th>{html.escape(h)}</th>" for h in header)
+    return (_macro_css(_current_theme()) + f'<div style="overflow-x:auto"><table class="md-watchlist"><tr>{head}</tr>{"".join(body)}</table></div>')
+
+
+def _usd(value) -> str:
+    return f"${value:,.0f}" if isinstance(value, (int, float)) else "—"
+
+
+def _render_congress_tab() -> None:
+    data = cached_house_data()
+    if data is None:
+        st.caption("House trades are unavailable right now. This is not the same as there being no trades.")
+        return
+    left, right = st.columns(2)
+    with left:
+        days = st.radio("Filed in the last", [30, 90, 180, 365], index=1, horizontal=True, key="ins_cong_days", format_func=lambda d: f"{d} days")
+    with right:
+        kind_label = st.radio("Trade type", ["Buys", "Sells", "All"], horizontal=True, key="ins_cong_kind")
+    kind = {"Buys": "buy", "Sells": "sell", "All": "all"}[kind_label]
+    st.caption(house_trades.coverage_text(data) + " Amounts are ranges, not exact. The window is by filing date, because that is when a trade became public.")
+    view = insider_views.congress_view(data, _london_today(), days, kind)
+    if not view["rows"]:
+        st.caption("No House trades match these filters in the filings we could read.")
+        return
+    st.markdown("**By company** (most House members first)")
+    body = []
+    for srow in view["summary"][:40]:
+        mark = " · cluster" if srow["cluster"] else ""
+        body.append(
+            "<tr>"
+            f"<td><b>{html.escape(srow['ticker'])}</b>{html.escape(mark)}</td>"
+            f"<td>{html.escape(str(srow['company'])[:60])}</td>"
+            f"<td>{srow['members']}</td><td>{srow['trades']}</td><td>{html.escape(srow['latest'])}</td></tr>"
+        )
+    st.markdown(_table_html(["Ticker", "Company (as filed)", "Members", "Trades", "Latest filing"], body), unsafe_allow_html=True)
+    st.caption("A cluster is three or more different members trading the same stock in the window.")
+    st.markdown("**Every trade**")
+    detail = []
+    for r in view["rows"][:200]:
+        flags = [f for f, on in (("late", r.get("late")), ("date looks wrong", r.get("future"))) if on]
+        link = house_trades.safe_link(r.get("link"))
+        src = f'<a href="{html.escape(link, quote=True)}" target="_blank" rel="noopener">Filing</a>' if link else "—"
+        detail.append(
+            "<tr>"
+            f"<td>{html.escape(str(r.get('filed')))}</td><td>{html.escape(str(r.get('traded')))}</td>"
+            f"<td><b>{html.escape(str(r.get('ticker')))}</b></td>"
+            f"<td>{html.escape(str(r.get('member')))} ({html.escape(str(r.get('district') or '—'))})</td>"
+            f"<td>{html.escape(str(r.get('owner') or '—'))}</td>"
+            f"<td>{html.escape(str(r.get('type') or '—').capitalize())}</td>"
+            f"<td class='md-mono'>{html.escape(house_trades.amount_text(r.get('amount_low'), r.get('amount_high')))}</td>"
+            f"<td>{html.escape(', '.join(flags)) or '—'}</td><td>{src}</td></tr>"
+        )
+    st.markdown(_table_html(["Filed", "Traded", "Ticker", "Member", "Owner", "Type", "Amount", "Flags", "Source"], detail), unsafe_allow_html=True)
+    if len(view["rows"]) > 200:
+        st.caption(f"Showing the latest 200 of {len(view['rows'])} trades.")
+
+
+def _render_company_tab() -> None:
+    data = cached_company_buys()
+    if data is None:
+        st.caption("Company insider buys are unavailable right now. The nightly job may not have run yet. This is not the same as there being no buys.")
+        return
+    left, right = st.columns(2)
+    with left:
+        days = st.radio("Filed in the last", [7, 30, 90], index=1, horizontal=True, key="ins_co_days", format_func=lambda d: f"{d} days")
+    with right:
+        floor = st.radio("Minimum total value", [0, 50000, 100000, 250000, 1000000], horizontal=True, key="ins_co_floor",
+                         format_func=lambda v: "Any" if v == 0 else _usd(v))
+    st.caption(insider_views.company_coverage(data))
+    view = insider_views.company_view(data, _london_today(), days, floor)
+    if not view["rows"]:
+        st.caption("No insider buys match these filters.")
+        return
+    st.markdown("**By company** (largest total first)")
+    body = []
+    for srow in view["summary"][:40]:
+        mark = " · cluster" if srow["cluster"] else ""
+        note = f" (+{srow['unpriced']} without a price)" if srow["unpriced"] else ""
+        body.append(
+            "<tr>"
+            f"<td><b>{html.escape(str(srow['ticker'] or '—'))}</b>{html.escape(mark)}</td>"
+            f"<td>{html.escape(str(srow['company'] or '—')[:60])}</td>"
+            f"<td>{srow['people']}</td><td>{srow['buys']}</td>"
+            f"<td class='md-mono'>{html.escape(_usd(srow['value']))}{html.escape(note)}</td>"
+            f"<td>{html.escape(srow['latest'])}</td></tr>"
+        )
+    st.markdown(_table_html(["Ticker", "Company", "Insiders", "Buys", "Total value", "Latest filing"], body), unsafe_allow_html=True)
+    st.caption("A cluster is three or more different insiders buying the same company in the window.")
+    st.markdown("**Every buy**")
+    detail = []
+    for r in view["rows"][:200]:
+        link = insider_views.sec_link(r.get("link"))
+        src = f'<a href="{html.escape(link, quote=True)}" target="_blank" rel="noopener">Filing</a>' if link else "—"
+        price = f"${r['price']:,.2f}" if isinstance(r.get("price"), (int, float)) else "—"
+        shares = f"{r['shares']:,.0f}" if isinstance(r.get("shares"), (int, float)) else "—"
+        amended = " (amended)" if r.get("amended") else ""
+        detail.append(
+            "<tr>"
+            f"<td>{html.escape(str(r.get('filed')))}</td><td>{html.escape(str(r.get('traded') or '—'))}</td>"
+            f"<td><b>{html.escape(str(r.get('ticker') or '—'))}</b></td>"
+            f"<td>{html.escape(str(r.get('company') or '—')[:40])}</td>"
+            f"<td>{html.escape(str(r.get('person')))}{html.escape(amended)}</td><td>{html.escape(str(r.get('role') or '—'))}</td>"
+            f"<td class='md-mono'>{html.escape(shares)}</td><td class='md-mono'>{html.escape(price)}</td>"
+            f"<td class='md-mono'>{html.escape(_usd(r.get('value')))}</td><td>{src}</td></tr>"
+        )
+    st.markdown(_table_html(["Filed", "Traded", "Ticker", "Company", "Insider", "Role", "Shares", "Price", "Value", "Source"], detail), unsafe_allow_html=True)
+    if len(view["rows"]) > 200:
+        st.caption(f"Showing the latest 200 of {len(view['rows'])} buys.")
+
+
+def _render_insiders_page() -> None:
+    if st.button("← Back to the watchlist", key="macro_insiders_back"):
+        _clear_macro_route()
+        st.rerun()
+    st.markdown("## Insider and government buys")
+    st.caption("Disclosures are delayed by law. Congress members can file up to 45 days after a trade, and company insiders within about two business days. This is information, not a signal to trade.")
+    congress, company = st.tabs(["Congress (House)", "Company insiders"])
+    with congress:
+        _render_congress_tab()
+    with company:
+        _render_company_tab()
+
+
 def render_macro_desk() -> None:
     """Macro Desk home, index and stock pages. The top strip and the
     red-folder calendar are visible on every page (spec section 3)."""
@@ -2022,6 +2168,10 @@ def render_macro_desk() -> None:
     if index_id is not None:
         render_index_page(index_id, data, calendar)
         return
+    if _requested_view() == "insiders":
+        _render_insiders_page()
+        return
+    st.markdown(f"[Insider and government buys →]({_link_with_theme('view=insiders')})")
     _render_watchlist()
     st.caption(
         "Trend: Bullish if the latest close is above the 50-period EMA and the 50 EMA is rising, otherwise Bearish. "

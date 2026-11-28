@@ -746,6 +746,61 @@ def test_house_trades_table_shows_matches_coverage_and_the_unavailable_state() -
     assert any("unavailable right now" in c.value for c in at.caption)
 
 
+def test_insiders_page_renders_both_tabs_escapes_text_and_handles_missing_data() -> None:
+    from streamlit.testing.v1 import AppTest
+
+    def app() -> None:
+        import json as _j, os, sys
+
+        sys.path.insert(0, os.environ["TL_ROOT"])
+        import research_desk_page as page
+
+        page.load_watchlist_cache = lambda path=None: {"added": {}}
+        page.render_strip = lambda active_id=None: {}
+        page.cached_red_folder = lambda *a, **k: {"events": [], "available": True, "partial": False}
+        page.render_calendar = lambda *a, **k: None
+        page.render_event_detail = lambda *a, **k: None
+        page.cached_house_data = lambda: _j.loads(os.environ["TL_HOUSE"]) if os.environ.get("TL_HOUSE") else None
+        page.cached_company_buys = lambda: _j.loads(os.environ["TL_CO"]) if os.environ.get("TL_CO") else None
+        page.render_macro_desk()
+
+    import datetime, json, os
+
+    today = datetime.date.today()
+    recent = (today - datetime.timedelta(days=3)).isoformat()
+    house = {"generated_at": recent, "coverage": {"filings_seen": 2, "parsed": 2, "not_read": 0}, "not_read": [],
+             "trades": [{"asset_code": "ST", "ticker": "NVDA", "asset": "Nvidia <i>Corp</i>", "member": "Jo <b>Doe</b>", "district": "TX01",
+                         "owner": "Self", "type": "buy", "amount_low": 1001, "amount_high": 15000, "filed": recent, "traded": recent,
+                         "late": False, "link": "https://disclosures-clerk.house.gov/public_disc/ptr-pdfs/2026/1.pdf"}]}
+    co = {"coverage": {"days_from": recent, "days_to": recent},
+          "buys": [{"ticker": "ACME", "company": "Acme <u>Corp</u>", "person": "Sam <b>Lee</b>", "role": "CEO", "filed": recent, "traded": recent,
+                    "shares": 1000, "price": 12.5, "value": 12500.0, "amended": False, "link": "https://www.sec.gov/Archives/edgar/data/1/2.txt"}]}
+    os.environ["TL_ROOT"] = str(ROOT)
+    os.environ["TL_HOUSE"] = json.dumps(house)
+    os.environ["TL_CO"] = json.dumps(co)
+    at = AppTest.from_function(app)
+    at.query_params["view"] = "insiders"
+    at.run(timeout=60)
+    assert not at.exception
+    body = " ".join(m.value for m in at.markdown)
+    assert "NVDA" in body and "ACME" in body and "$12,500" in body and "$12.50" in body
+    assert "<b>Doe</b>" not in body and "&lt;b&gt;Doe&lt;/b&gt;" in body and "<b>Lee</b>" not in body and "<u>Corp</u>" not in body
+    assert len(at.tabs) == 2
+
+    os.environ["TL_HOUSE"] = ""
+    os.environ["TL_CO"] = ""
+    at2 = AppTest.from_function(app)
+    at2.query_params["view"] = "insiders"
+    at2.run(timeout=60)
+    assert not at2.exception
+    caps = " ".join(c.value for c in at2.caption)
+    assert "House trades are unavailable" in caps and "Company insider buys are unavailable" in caps
+
+    at3 = AppTest.from_function(app)
+    at3.run(timeout=60)
+    assert any("view=insiders" in m.value for m in at3.markdown)
+
+
 def test_dark_and_light_themes_style_the_sidebar_and_buttons() -> None:
     from research_desk_page import MACRO_THEME_CSS
 
@@ -790,5 +845,6 @@ if __name__ == "__main__":
     test_free_feed_sentiment_scores_headlines_and_hides_x()
     test_watchlist_delete_is_a_link_at_the_end_of_each_row_and_removes_the_stock()
     test_house_trades_table_shows_matches_coverage_and_the_unavailable_state()
+    test_insiders_page_renders_both_tabs_escapes_text_and_handles_missing_data()
     test_dark_and_light_themes_style_the_sidebar_and_buttons()
     print("Macro Desk checks passed.")
