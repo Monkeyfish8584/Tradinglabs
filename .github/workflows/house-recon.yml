@@ -1,0 +1,28 @@
+name: House recon (phase 0)
+on:
+  workflow_dispatch:
+    inputs:
+      year:
+        description: Filing year
+        default: "2025"
+permissions:
+  contents: write
+jobs:
+  recon:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download index and sample filings
+        env:
+          YEAR: ${{ inputs.year }}
+        run: python3 scripts/house_recon.py
+      - name: Publish samples to house-recon branch
+        run: |
+          git config user.name "house-recon-bot"
+          git config user.email "house-recon-bot@users.noreply.github.com"
+          git checkout --orphan house-recon
+          git rm -rf . >/dev/null 2>&1 || true
+          git checkout "$GITHUB_SHA" -- .gitignore 2>/dev/null || true
+          git add -f recon
+          git commit -m "House recon samples"
+          git push -f origin house-recon
