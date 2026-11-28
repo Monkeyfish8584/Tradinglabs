@@ -1,0 +1,44 @@
+name: Insider buys nightly
+on:
+  schedule:
+    - cron: "41 6 * * *"
+  workflow_dispatch:
+permissions:
+  contents: write
+concurrency:
+  group: insider-nightly
+  cancel-in-progress: false
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v4
+      - name: Get existing data (if any)
+        run: |
+          mkdir -p work
+          if git ls-remote --exit-code --heads origin insider-data >/dev/null 2>&1; then
+            git fetch origin insider-data
+            git show origin/insider-data:insider_buys.json > work/insider_buys.json
+          fi
+      - name: Read new Form 4 filings
+        id: run
+        env:
+          DATA_FILE: work/insider_buys.json
+        run: python3 scripts/insider_nightly.py
+        continue-on-error: true
+      - name: Publish data branch
+        run: |
+          test -f work/insider_buys.json || { echo "no data file produced"; exit 1; }
+          cp work/insider_buys.json /tmp/insider_buys.json
+          git config user.name "insider-bot"
+          git config user.email "insider-bot@users.noreply.github.com"
+          git checkout --orphan insider-data-new
+          git rm -rf . >/dev/null 2>&1 || true
+          cp /tmp/insider_buys.json insider_buys.json
+          git add insider_buys.json
+          git commit -qm "Insider buys data $(date -u +%F)"
+          git push -f origin insider-data-new:insider-data
+      - name: Fail if the read step failed
+        if: steps.run.outcome == 'failure'
+        run: exit 1
