@@ -1,0 +1,22 @@
+name: Senate recon (phase S0)
+on:
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  recon:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Try the Senate eFD public search
+        run: python3 scripts/senate_recon.py
+      - name: Publish results to senate-recon-data branch
+        if: always()
+        run: |
+          git config user.name "senate-recon-bot"
+          git config user.email "senate-recon-bot@users.noreply.github.com"
+          git checkout --orphan senate-recon-data
+          git rm -rf . >/dev/null 2>&1 || true
+          git add -f senate_recon
+          git commit -qm "Senate recon results"
+          git push -f origin senate-recon-data
